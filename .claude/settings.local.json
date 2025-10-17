@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//d/1-PKU/PKU/1 Master/Projects/RealSceneDL/src/RealSceneDL/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
