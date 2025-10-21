@@ -1,4 +1,4 @@
 data
-install-claude-vscode.ps1
+*.ps1
 .mcp.json
 
