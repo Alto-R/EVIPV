@@ -2,7 +2,7 @@
 车顶光伏发电量计算 - 主执行脚本 (GPU加速版)
 
 完整流程:
-1. 从3D Tiles生成建筑mesh (方案A)
+1. 从建筑footprint生成建筑mesh
 2. 获取太阳辐射数据并缓存
 3. GPU加速计算车顶光伏发电量 (1分钟分辨率)
 
@@ -21,7 +21,7 @@ import yaml
 from datetime import datetime
 
 # 导入自定义模块
-from prepare_building_mesh_from_3dtiles import prepare_building_mesh_from_3dtiles
+from prepare_building_mesh_from_footprint import prepare_building_mesh_from_footprint
 from fetch_irradiance_data import fetch_and_cache_irradiance_data, convert_to_pvlib_format
 from pv_calculator_gpu import GPUAcceleratedSolarPVCalculator
 
@@ -42,7 +42,7 @@ def create_default_config(output_path='config.yaml'):
             'lon': 114.057868,
         },
         'data_sources': {
-            '3d_tiles_path': 'data/shenzhen_3dtiles/tileset.json',
+            'footprint_path': 'data/shenzhen_buildings.geojson',
             'trajectory_path': 'traj/onetra_0312_1.csv',
         },
         'pv_system': {
@@ -55,6 +55,7 @@ def create_default_config(output_path='config.yaml'):
             'time_resolution_minutes': 1,  # 时间分辨率(分钟)
             'use_gpu': True,  # 是否使用GPU加速
             'batch_size': 100,  # 批处理大小
+            'mesh_grid_size': None,  # mesh网格细分精度(米)，None表示不细分
         },
         'output': {
             'mesh_path': 'building_mesh.vtk',
@@ -95,8 +96,8 @@ def main(config=None, args=None):
             config['location']['lat'] = args.lat
         if args.lon is not None:
             config['location']['lon'] = args.lon
-        if args.tileset is not None:
-            config['data_sources']['3d_tiles_path'] = args.tileset
+        if args.footprint is not None:
+            config['data_sources']['footprint_path'] = args.footprint
         if args.trajectory is not None:
             config['data_sources']['trajectory_path'] = args.trajectory
         if args.date is not None:
@@ -107,13 +108,14 @@ def main(config=None, args=None):
     # 提取配置
     lat = config['location']['lat']
     lon = config['location']['lon']
-    tileset_path = config['data_sources']['3d_tiles_path']
+    footprint_path = config['data_sources']['footprint_path']
     trajectory_path = config['data_sources']['trajectory_path']
     mesh_path = config['output']['mesh_path']
     result_path = config['output']['result_path']
     time_resolution = config['computation']['time_resolution_minutes']
     use_gpu = config['computation']['use_gpu']
     batch_size = config['computation']['batch_size']
+    mesh_grid_size = config['computation'].get('mesh_grid_size', None)
 
     # 确定日期范围
     if 'date' in config:
@@ -130,9 +132,10 @@ def main(config=None, args=None):
     print("\n📋 配置信息:")
     print(f"   位置: {config['location']['name']} ({lat:.4f}, {lon:.4f})")
     print(f"   日期: {start_date} 至 {end_date}")
-    print(f"   3D Tiles: {tileset_path}")
+    print(f"   Footprint数据: {footprint_path}")
     print(f"   轨迹数据: {trajectory_path}")
     print(f"   时间分辨率: {time_resolution} 分钟")
+    print(f"   Mesh网格精度: {mesh_grid_size if mesh_grid_size else '不细分'}")
     print(f"   GPU加速: {'启用' if use_gpu else '禁用'}")
     print(f"   输出路径: {result_path}")
 
@@ -147,10 +150,11 @@ def main(config=None, args=None):
         print(f"   顶点数: {building_mesh.n_points:,}")
         print(f"   三角形数: {building_mesh.n_faces:,}")
     else:
-        print(f"🔄 从3D Tiles转换mesh...")
-        building_mesh = prepare_building_mesh_from_3dtiles(
-            tileset_path=tileset_path,
-            output_mesh_path=mesh_path
+        print(f"🔄 从建筑footprint转换mesh...")
+        building_mesh = prepare_building_mesh_from_footprint(
+            footprint_path=footprint_path,
+            output_mesh_path=mesh_path,
+            grid_size=mesh_grid_size
         )
 
     # ===== 步骤2: 获取太阳辐射数据 =====
@@ -313,7 +317,7 @@ if __name__ == "__main__":
     parser.add_argument('--lat', type=float, help='纬度')
     parser.add_argument('--lon', type=float, help='经度')
     parser.add_argument('--date', type=str, help='日期 YYYY-MM-DD')
-    parser.add_argument('--tileset', type=str, help='3D Tiles tileset.json路径')
+    parser.add_argument('--footprint', type=str, help='建筑footprint数据路径 (GeoJSON/Shapefile)')
     parser.add_argument('--trajectory', type=str, help='轨迹数据CSV路径')
     parser.add_argument('--no-gpu', action='store_true', help='禁用GPU加速')
 

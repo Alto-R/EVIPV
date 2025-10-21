@@ -6,7 +6,7 @@ A GPU-accelerated tool for calculating photovoltaic power generation on moving v
 
 ## 🌟 Key Features
 
-- ✅ **Direct 3D Tiles Integration**: Convert Google 3D Tiles data to building meshes
+- ✅ **Building Footprint Processing**: Convert building footprint data (GeoJSON/Shapefile) to 3D meshes using RealSceneDL
 - ✅ **Intelligent Caching**: Automatic solar irradiance data caching to avoid redundant downloads
 - ✅ **GPU Acceleration**: PyTorch-powered batch computation with 8-10x speedup
 - ✅ **High Precision**: Support for 1-minute time resolution
@@ -18,7 +18,7 @@ A GPU-accelerated tool for calculating photovoltaic power generation on moving v
 
 ```bash
 # Python Environment
-Python >= 3.11
+Python >= 3.8
 
 # Core Libraries
 trimesh
@@ -26,13 +26,15 @@ pyvista
 pandas
 numpy
 geopandas
+shapely
 pvlib-python
 pyproj
 pyyaml
 tqdm
 
-# RealSceneDL Library
-# Must be added to Python path
+# RealSceneDL Library (for footprint to mesh conversion)
+# Must be installed or added to Python path
+# pip install -e /path/to/RealSceneDL
 ```
 
 ### Optional Dependencies (GPU Acceleration)
@@ -67,7 +69,7 @@ location:
   lon: 114.057868
 
 data_sources:
-  3d_tiles_path: data/shenzhen_3dtiles/tileset.json
+  footprint_path: data/shenzhen_buildings.geojson  # Building footprint data
   trajectory_path: traj/onetra_0312_1.csv
 
 pv_system:
@@ -80,6 +82,7 @@ computation:
   time_resolution_minutes: 1  # 1-minute resolution
   use_gpu: true              # Enable GPU
   batch_size: 100
+  mesh_grid_size: null       # Mesh grid size (m), null = no subdivision
 
 output:
   mesh_path: building_mesh.vtk
@@ -97,7 +100,7 @@ python main_pv_calculation_gpu.py \
     --lat 22.543099 \
     --lon 114.057868 \
     --date 2019-03-12 \
-    --tileset data/shenzhen_3dtiles/tileset.json \
+    --footprint data/shenzhen_buildings.geojson \
     --trajectory traj/onetra_0312_1.csv
 ```
 
@@ -107,11 +110,14 @@ python main_pv_calculation_gpu.py \
 .
 ├── code/                                   # Source code
 │   ├── main_pv_calculation_gpu.py          # Main execution script
-│   ├── prepare_building_mesh_from_3dtiles.py  # 3D Tiles → mesh conversion
+│   ├── prepare_building_mesh_from_footprint.py  # Footprint → mesh conversion
 │   ├── fetch_irradiance_data.py            # Solar irradiance data fetching
 │   ├── pv_calculator_gpu.py                # GPU-accelerated calculator
 │   ├── pv_generation_pvlib.py              # Base calculator (CPU)
 │   └── config.yaml                         # Configuration file
+│
+├── data/                                   # Input data
+│   └── shenzhen_buildings.geojson          # Building footprint data
 │
 ├── traj/                                   # GPS trajectory data
 │   └── onetra_0312_1.csv
@@ -131,25 +137,60 @@ python main_pv_calculation_gpu.py \
 
 If you prefer to run each step individually:
 
-### Step 1: Convert Building Mesh
+### Step 1: Prepare Building Footprint Data
+
+Your footprint data must include:
+- **geometry**: Polygon geometries
+- **height**: Building height in meters
+
+Supported formats: GeoJSON, Shapefile, GeoPackage
+
+Example GeoJSON structure:
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[lon1, lat1], [lon2, lat2], ...]]
+      },
+      "properties": {
+        "height": 25.0
+      }
+    }
+  ]
+}
+```
+
+### Step 2: Convert Building Mesh
 
 ```bash
 cd code
-python prepare_building_mesh_from_3dtiles.py \
-    -i ../data/shenzhen_3dtiles/tileset.json \
+python prepare_building_mesh_from_footprint.py \
+    -i ../data/shenzhen_buildings.geojson \
     -o ../building_mesh.vtk
 ```
 
-**Optional mesh simplification**:
+**Optional: Fine-grained mesh for detailed analysis**:
 ```bash
-python prepare_building_mesh_from_3dtiles.py \
-    -i ../data/shenzhen_3dtiles/tileset.json \
+python prepare_building_mesh_from_footprint.py \
+    -i ../data/shenzhen_buildings.geojson \
+    -o ../building_mesh.vtk \
+    --grid-size 10  # 10-meter grid
+```
+
+**Optional: Mesh simplification**:
+```bash
+python prepare_building_mesh_from_footprint.py \
+    -i ../data/shenzhen_buildings.geojson \
     -o ../building_mesh.vtk \
     --simplify \
     --target-faces 1000000
 ```
 
-### Step 2: Fetch Irradiance Data
+### Step 3: Fetch Irradiance Data
 
 ```bash
 cd code
@@ -166,7 +207,7 @@ python fetch_irradiance_data.py \
 - Optional CSV export to `irradiance_data/`
 - Data quality reporting
 
-### Step 3: Run PV Calculation
+### Step 4: Run PV Calculation
 
 Use the main script with pre-processed data for faster execution.
 
@@ -254,22 +295,36 @@ computation:
 
 ### 2. RealSceneDL Module Not Found
 
-**Solution**: Verify the path in each script under `code/`
+**Solution**: Install RealSceneDL or add it to Python path
 
-```python
-REALSCENEDL_PATH = r"D:\1-PKU\PKU\1 Master\Projects\RealSceneDL\src"
+```bash
+# Option 1: Install in editable mode
+cd /path/to/RealSceneDL
+pip install -e .
+
+# Option 2: Add to Python path
+export PYTHONPATH="/path/to/RealSceneDL/src:$PYTHONPATH"
 ```
 
-Update the path to match your system.
+### 3. Invalid Footprint Data
 
-### 3. Slow Irradiance Data Download
+**Solution**: Ensure your data has required fields
+
+```python
+import geopandas as gpd
+gdf = gpd.read_file('buildings.geojson')
+print(gdf.columns)  # Must include 'geometry' and 'height'
+print(gdf.crs)      # Should be EPSG:4326 (WGS84)
+```
+
+### 4. Slow Irradiance Data Download
 
 **Solution**:
 - First download automatically cached to `openmeteo_cache/`
 - Subsequent runs read from cache (very fast)
 - Hourly data automatically interpolated to 1-minute
 
-### 4. Trajectory Data Format Error
+### 5. Trajectory Data Format Error
 
 **Ensure CSV contains**:
 - `datetime`: Timestamp (parseable to datetime)
@@ -302,7 +357,7 @@ Update the path to match your system.
 - **pvlib-python**: https://pvlib-python.readthedocs.io/
 - **Open-Meteo API**: https://open-meteo.com/
 - **PyVista Ray Tracing**: https://docs.pyvista.org/
-- **Google 3D Tiles**: https://developers.google.com/maps/documentation/tile
+- **RealSceneDL**: Building footprint to 3D mesh conversion library
 
 ## 📄 License
 

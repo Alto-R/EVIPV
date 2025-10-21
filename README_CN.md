@@ -6,7 +6,7 @@
 
 ## 🌟 主要特性
 
-- ✅ **直接3D Tiles集成**: 从Google 3D Tiles数据直接生成建筑mesh
+- ✅ **建筑底面轮廓处理**: 使用RealSceneDL将建筑底面数据(GeoJSON/Shapefile)转换为3D mesh
 - ✅ **智能缓存**: 太阳辐射数据自动缓存，避免重复下载
 - ✅ **GPU加速**: 使用PyTorch加速批量计算，提速8-10倍
 - ✅ **高精度**: 支持1分钟时间分辨率
@@ -26,13 +26,15 @@ pyvista
 pandas
 numpy
 geopandas
+shapely
 pvlib-python
 pyproj
 pyyaml
 tqdm
 
-# RealSceneDL库
-# 需要添加到Python路径
+# RealSceneDL库 (用于底面轮廓到mesh的转换)
+# 需要安装或添加到Python路径
+# pip install -e /path/to/RealSceneDL
 ```
 
 ### 可选依赖 (GPU加速)
@@ -67,7 +69,7 @@ location:
   lon: 114.057868
 
 data_sources:
-  3d_tiles_path: data/shenzhen_3dtiles/tileset.json
+  footprint_path: data/shenzhen_buildings.geojson  # 建筑底面轮廓数据
   trajectory_path: traj/onetra_0312_1.csv
 
 pv_system:
@@ -80,6 +82,7 @@ computation:
   time_resolution_minutes: 1  # 1分钟分辨率
   use_gpu: true              # 启用GPU
   batch_size: 100
+  mesh_grid_size: null       # mesh网格大小(m), null=不细分
 
 output:
   mesh_path: building_mesh.vtk
@@ -97,7 +100,7 @@ python main_pv_calculation_gpu.py \
     --lat 22.543099 \
     --lon 114.057868 \
     --date 2019-03-12 \
-    --tileset data/shenzhen_3dtiles/tileset.json \
+    --footprint data/shenzhen_buildings.geojson \
     --trajectory traj/onetra_0312_1.csv
 ```
 
@@ -107,11 +110,14 @@ python main_pv_calculation_gpu.py \
 .
 ├── code/                                   # 源代码
 │   ├── main_pv_calculation_gpu.py          # 主执行脚本
-│   ├── prepare_building_mesh_from_3dtiles.py  # 3D Tiles → mesh转换
+│   ├── prepare_building_mesh_from_footprint.py  # 底面轮廓 → mesh转换
 │   ├── fetch_irradiance_data.py            # 太阳辐射数据获取
 │   ├── pv_calculator_gpu.py                # GPU加速计算器
 │   ├── pv_generation_pvlib.py              # 基础计算器(CPU)
 │   └── config.yaml                         # 配置文件
+│
+├── data/                                   # 输入数据
+│   └── shenzhen_buildings.geojson          # 建筑底面轮廓数据
 │
 ├── traj/                                   # GPS轨迹数据
 │   └── onetra_0312_1.csv
@@ -131,25 +137,60 @@ python main_pv_calculation_gpu.py \
 
 如果您想分步运行，可以单独执行各个模块：
 
-### 步骤1: 转换建筑mesh
+### 步骤1: 准备建筑底面轮廓数据
+
+您的底面轮廓数据必须包含：
+- **geometry**: 多边形几何
+- **height**: 建筑高度(米)
+
+支持的格式：GeoJSON, Shapefile, GeoPackage
+
+GeoJSON结构示例：
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[lon1, lat1], [lon2, lat2], ...]]
+      },
+      "properties": {
+        "height": 25.0
+      }
+    }
+  ]
+}
+```
+
+### 步骤2: 转换建筑mesh
 
 ```bash
 cd code
-python prepare_building_mesh_from_3dtiles.py \
-    -i ../data/shenzhen_3dtiles/tileset.json \
+python prepare_building_mesh_from_footprint.py \
+    -i ../data/shenzhen_buildings.geojson \
     -o ../building_mesh.vtk
 ```
 
-**可选的mesh简化**:
+**可选：细粒度mesh用于详细分析**:
 ```bash
-python prepare_building_mesh_from_3dtiles.py \
-    -i ../data/shenzhen_3dtiles/tileset.json \
+python prepare_building_mesh_from_footprint.py \
+    -i ../data/shenzhen_buildings.geojson \
+    -o ../building_mesh.vtk \
+    --grid-size 10  # 10米网格
+```
+
+**可选：mesh简化**:
+```bash
+python prepare_building_mesh_from_footprint.py \
+    -i ../data/shenzhen_buildings.geojson \
     -o ../building_mesh.vtk \
     --simplify \
     --target-faces 1000000
 ```
 
-### 步骤2: 获取辐射数据
+### 步骤3: 获取辐射数据
 
 ```bash
 cd code
@@ -166,7 +207,7 @@ python fetch_irradiance_data.py \
 - 可选CSV导出到 `irradiance_data/`
 - 数据质量报告
 
-### 步骤3: 运行计算
+### 步骤4: 运行计算
 
 使用主脚本配合预处理的数据可以更快执行。
 
@@ -254,22 +295,36 @@ computation:
 
 ### 2. 找不到RealSceneDL模块
 
-**解决**: 检查 `code/` 目录下各脚本中的路径设置
+**解决**: 安装RealSceneDL或将其添加到Python路径
 
-```python
-REALSCENEDL_PATH = r"D:\1-PKU\PKU\1 Master\Projects\RealSceneDL\src"
+```bash
+# 方案1: 以可编辑模式安装
+cd /path/to/RealSceneDL
+pip install -e .
+
+# 方案2: 添加到Python路径
+export PYTHONPATH="/path/to/RealSceneDL/src:$PYTHONPATH"
 ```
 
-根据您的系统更新此路径。
+### 3. 无效的底面轮廓数据
 
-### 3. 辐射数据下载慢
+**解决**: 确保您的数据包含必需字段
+
+```python
+import geopandas as gpd
+gdf = gpd.read_file('buildings.geojson')
+print(gdf.columns)  # 必须包含 'geometry' 和 'height'
+print(gdf.crs)      # 应为 EPSG:4326 (WGS84)
+```
+
+### 4. 辐射数据下载慢
 
 **解决**:
 - 第一次下载后会自动缓存到 `openmeteo_cache/`
 - 后续运行会直接读取缓存，非常快
 - 1小时数据会自动插值到1分钟分辨率
 
-### 4. 轨迹数据格式错误
+### 5. 轨迹数据格式错误
 
 **确保CSV包含以下列**:
 - `datetime`: 时间戳 (可解析为datetime)
@@ -302,7 +357,7 @@ REALSCENEDL_PATH = r"D:\1-PKU\PKU\1 Master\Projects\RealSceneDL\src"
 - **pvlib-python**: https://pvlib-python.readthedocs.io/
 - **Open-Meteo API**: https://open-meteo.com/
 - **PyVista光线追踪**: https://docs.pyvista.org/
-- **Google 3D Tiles**: https://developers.google.com/maps/documentation/tile
+- **RealSceneDL**: 建筑底面轮廓到3D mesh转换库
 
 ## 📄 许可证
 
