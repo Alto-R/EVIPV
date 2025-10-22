@@ -14,6 +14,27 @@ if REALSCENEDL_PATH not in sys.path:
 
 from RealSceneDL.analysis.meteo import get_openmeteo_irradiance_data
 
+# ============================================================================
+# 配置区域 - 在此修改参数
+# ============================================================================
+CONFIG = {
+    # 位置坐标
+    'LAT': 22.543099,  # 纬度
+    'LON': 114.057868,  # 经度
+
+    # 日期范围 (格式: YYYY-MM-DD)
+    'START_DATE': '2019-01-01',  # 开始日期
+    'END_DATE': '2020-01-01',    # 结束日期
+
+    # 时间粒度
+    'GRANULARITY': '1hour',  # 时间粒度: '1min' 或 '1hour'
+
+    # 输出设置
+    'SAVE_CSV': True,  # 是否额外保存为CSV格式（已自动缓存parquet格式）
+    'OUTPUT_DIR': 'irradiance_data',  # CSV输出目录
+}
+# ============================================================================
+
 
 def fetch_and_cache_irradiance_data(lat, lon, start_date, end_date,
                                      granularity='1min',
@@ -181,30 +202,25 @@ def load_cached_irradiance_data(lat, lon, start_date, end_date,
 
 
 if __name__ == "__main__":
-    import argparse
+    """
+    获取太阳辐射数据
 
-    parser = argparse.ArgumentParser(description='获取太阳辐射数据')
-    parser.add_argument('--lat', type=float, required=True, help='纬度')
-    parser.add_argument('--lon', type=float, required=True, help='经度')
-    parser.add_argument('--start', type=str, required=True, help='开始日期 YYYY-MM-DD')
-    parser.add_argument('--end', type=str, required=True, help='结束日期 YYYY-MM-DD')
-    parser.add_argument('--granularity', type=str, default='1min',
-                        choices=['1min', '1hour'], help='时间粒度')
-    parser.add_argument('--no-csv', action='store_true', help='不保存CSV')
-    parser.add_argument('--output-dir', type=str, default='irradiance_data',
-                        help='CSV输出目录')
+    使用方法:
+    1. 在文件顶部的CONFIG区域修改参数
+    2. 运行: python fetch_irradiance_data.py
 
-    args = parser.parse_args()
+    数据将自动缓存到 openmeteo_cache/ 目录
+    """
 
     try:
         df = fetch_and_cache_irradiance_data(
-            lat=args.lat,
-            lon=args.lon,
-            start_date=args.start,
-            end_date=args.end,
-            granularity=args.granularity,
-            save_csv=not args.no_csv,
-            output_dir=args.output_dir
+            lat=CONFIG['LAT'],
+            lon=CONFIG['LON'],
+            start_date=CONFIG['START_DATE'],
+            end_date=CONFIG['END_DATE'],
+            granularity=CONFIG['GRANULARITY'],
+            save_csv=CONFIG['SAVE_CSV'],
+            output_dir=CONFIG['OUTPUT_DIR']
         )
 
         print("\n数据预览:")

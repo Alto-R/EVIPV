@@ -1,13 +1,13 @@
 """
 GPU加速的车顶光伏发电量计算器
 继承自pv_generation_pvlib.py的SolarPVCalculator
-使用PyTorch进行GPU加速批量计算
+使用PyTorch + triro/OptiX进行完整GPU加速流水线
 """
 
 import os
 import pandas as pd
 import numpy as np
-import pyvista as pv
+import trimesh
 from tqdm import tqdm
 import pvlib
 from pvlib import temperature
@@ -26,10 +26,10 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
     """
     GPU加速版本的光伏计算器
 
-    使用PyTorch进行批量矩阵运算加速:
-    - GPU批量生成光线
-    - 批量POA计算
-    - 批量功率计算
+    使用完整GPU流水线加速:
+    - GPU批量生成光线（torch）
+    - GPU光线追踪（triro/OptiX）
+    - GPU批量功率计算（torch）
     """
 
     def __init__(self, *args, use_gpu=True, batch_size=100, **kwargs):
@@ -71,12 +71,12 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
     def calculate_shadows_batch_gpu(self, points_xy, height, times):
         """
-        GPU加速的批量阴影计算
+        GPU加速的批量阴影计算（完整GPU流水线）
 
         核心优化:
-        1. 将坐标数据转移到GPU
-        2. 批量矩阵运算替代循环生成光线
-        3. PyVista批量光线追踪
+        1. torch在GPU上批量生成光线
+        2. trimesh + triro/OptiX GPU光线追踪（无CPU传输）
+        3. GPU上解析结果
 
         Parameters
         ----------
@@ -128,23 +128,51 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
         # 🔥 GPU加速部分: 批量构建光线
         if self.device.type == 'cuda' and TORCH_AVAILABLE:
-            print(f"   ⚡ GPU批量生成光线...")
+            print(f"   ⚡ GPU完整流水线加速...")
 
             with torch.no_grad():
                 # 转移到GPU
                 query_points_gpu = torch.from_numpy(query_points).float().to(self.device)
                 sun_vectors_gpu = torch.from_numpy(sun_vectors).float().to(self.device)
 
-                # 批量计算光线起点
+                # 批量计算光线起点和方向
                 # shape: (n_times, n_points, 3)
                 ray_origins_batch = query_points_gpu.unsqueeze(0) - sun_vectors_gpu.unsqueeze(1) * 5e5
                 ray_directions_batch = sun_vectors_gpu.unsqueeze(1).expand(n_times, n_points, 3)
 
-                # 转回CPU用于PyVista光线追踪
-                all_ray_origins = ray_origins_batch.reshape(-1, 3).cpu().numpy()
-                all_ray_directions = ray_directions_batch.reshape(-1, 3).cpu().numpy()
+                # 重塑为 (n_total_rays, 3)
+                all_ray_origins_gpu = ray_origins_batch.reshape(-1, 3)
+                all_ray_directions_gpu = ray_directions_batch.reshape(-1, 3)
 
             print(f"   ✅ GPU光线生成完成")
+            print(f"   🎯 GPU光线追踪（triro/OptiX）...")
+
+            # GPU光线追踪（triro补丁自动使用OptiX）
+            # 注意：triro可以直接处理torch tensor
+            try:
+                location_np, ray_idx_np, tri_idx_np = self.building_trimesh.ray.intersects_location(
+                    all_ray_origins_gpu,  # torch.Tensor on CUDA
+                    all_ray_directions_gpu,  # torch.Tensor on CUDA
+                    multiple_hits=False
+                )
+
+                # ray_idx_np是相交光线的索引数组
+                intersection_rays = ray_idx_np
+
+                print(f"   ✅ GPU追踪完成，检测到 {len(intersection_rays):,} 个遮挡")
+
+            except Exception as e:
+                print(f"   ⚠️  GPU光线追踪失败，回退到CPU: {e}")
+                # 回退到CPU
+                all_ray_origins = all_ray_origins_gpu.cpu().numpy()
+                all_ray_directions = all_ray_directions_gpu.cpu().numpy()
+
+                location_np, ray_idx_np, tri_idx_np = self.building_trimesh.ray.intersects_location(
+                    all_ray_origins,
+                    all_ray_directions,
+                    multiple_hits=False
+                )
+                intersection_rays = ray_idx_np
 
         else:
             # CPU模式
@@ -161,13 +189,15 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
             all_ray_origins = np.vstack(all_ray_origins)
             all_ray_directions = np.vstack(all_ray_directions)
 
-        # 批量光线追踪（PyVista内部已优化）
-        print(f"   🎯 批量光线追踪...")
-        _, intersection_rays, _ = self.building_mesh.multi_ray_trace(
-            all_ray_origins, all_ray_directions, first_point=True
-        )
-
-        print(f"   ✅ 追踪完成，检测到 {len(intersection_rays):,} 个遮挡")
+            # CPU光线追踪
+            print(f"   🎯 CPU光线追踪...")
+            location_np, ray_idx_np, tri_idx_np = self.building_trimesh.ray.intersects_location(
+                all_ray_origins,
+                all_ray_directions,
+                multiple_hits=False
+            )
+            intersection_rays = ray_idx_np
+            print(f"   ✅ 追踪完成，检测到 {len(intersection_rays):,} 个遮挡")
 
         # 解析结果
         shadow_matrix = np.zeros((n_points, len(times)), dtype=int)
@@ -186,6 +216,103 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         print(f"   遮阴比例: {shaded_ratio*100:.2f}%")
 
         return pd.DataFrame(shadow_matrix, columns=times)
+
+    def _calculate_poa_vectorized(self, surface_tilt, surface_azimuth,
+                                   solar_zenith, solar_azimuth,
+                                   dni, dhi, ghi, albedo=0.2):
+        """
+        手动实现POA计算（与RealSceneDL源码一致的各向同性天空模型）
+
+        支持GPU加速的向量化计算
+
+        Parameters
+        ----------
+        surface_tilt : float
+            光伏板倾角(度)
+        surface_azimuth : float
+            光伏板方位角(度)
+        solar_zenith : numpy.ndarray
+            太阳天顶角(度) shape: (n_times,)
+        solar_azimuth : numpy.ndarray
+            太阳方位角(度) shape: (n_times,)
+        dni : numpy.ndarray
+            直射辐照度(W/m²) shape: (n_times,)
+        dhi : numpy.ndarray
+            散射辐照度(W/m²) shape: (n_times,)
+        ghi : numpy.ndarray
+            总水平辐照度(W/m²) shape: (n_times,)
+        albedo : float
+            地面反射率，默认0.2
+
+        Returns
+        -------
+        dict
+            包含 'poa_global', 'poa_direct', 'poa_diffuse' 的字典
+            每个值的shape: (n_times,)
+        """
+        # 转换为弧度
+        surface_tilt_rad = np.deg2rad(surface_tilt)
+        surface_azimuth_rad = np.deg2rad(surface_azimuth)
+        solar_zenith_rad = np.deg2rad(solar_zenith)
+        solar_azimuth_rad = np.deg2rad(solar_azimuth)
+
+        # 🔥 GPU加速计算（如果可用）
+        if self.device.type == 'cuda' and TORCH_AVAILABLE:
+            import torch
+            with torch.no_grad():
+                # 转换为torch张量
+                solar_zenith_t = torch.from_numpy(solar_zenith_rad).float().to(self.device)
+                solar_azimuth_t = torch.from_numpy(solar_azimuth_rad).float().to(self.device)
+                dni_t = torch.from_numpy(dni).float().to(self.device)
+                dhi_t = torch.from_numpy(dhi).float().to(self.device)
+                ghi_t = torch.from_numpy(ghi).float().to(self.device)
+
+                # 计算入射角余弦值（AOI: Angle of Incidence）
+                # cos(AOI) = cos(zenith) * cos(tilt) + sin(zenith) * sin(tilt) * cos(azimuth_sun - azimuth_surf)
+                cos_aoi = (torch.cos(solar_zenith_t) * np.cos(surface_tilt_rad) +
+                          torch.sin(solar_zenith_t) * np.sin(surface_tilt_rad) *
+                          torch.cos(solar_azimuth_t - surface_azimuth_rad))
+
+                # 直射分量：POA_direct = DNI × cos(AOI)，但AOI必须 <= 90度
+                poa_direct_t = torch.clamp(dni_t * cos_aoi, min=0.0)
+
+                # 散射分量（各向同性天空模型）：POA_diffuse = DHI × (1 + cos(tilt)) / 2
+                poa_diffuse_t = dhi_t * (1 + np.cos(surface_tilt_rad)) / 2
+
+                # 反射分量：POA_reflected = GHI × albedo × (1 - cos(tilt)) / 2
+                poa_reflected_t = ghi_t * albedo * (1 - np.cos(surface_tilt_rad)) / 2
+
+                # 总POA
+                poa_global_t = poa_direct_t + poa_diffuse_t + poa_reflected_t
+
+                # 转回CPU numpy
+                poa_global = poa_global_t.cpu().numpy()
+                poa_direct = poa_direct_t.cpu().numpy()
+                poa_diffuse = poa_diffuse_t.cpu().numpy()
+        else:
+            # CPU计算
+            # 计算入射角余弦值
+            cos_aoi = (np.cos(solar_zenith_rad) * np.cos(surface_tilt_rad) +
+                      np.sin(solar_zenith_rad) * np.sin(surface_tilt_rad) *
+                      np.cos(solar_azimuth_rad - surface_azimuth_rad))
+
+            # 直射分量
+            poa_direct = np.maximum(dni * cos_aoi, 0.0)
+
+            # 散射分量
+            poa_diffuse = dhi * (1 + np.cos(surface_tilt_rad)) / 2
+
+            # 反射分量
+            poa_reflected = ghi * albedo * (1 - np.cos(surface_tilt_rad)) / 2
+
+            # 总POA
+            poa_global = poa_direct + poa_diffuse + poa_reflected
+
+        return {
+            'poa_global': poa_global,
+            'poa_direct': poa_direct,
+            'poa_diffuse': poa_diffuse
+        }
 
     def calculate_pv_power_gpu(self, times, points_xy, vehicle_azimuths,
                                weather_data=None, tilt=5, height=1.5):
@@ -237,9 +364,16 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
             wind_speed = np.full(len(times), 2.0)
 
         # 批量计算发电功率
-        print(f"\n⚡ 批量计算发电功率...")
+        print(f"\n⚡ 批量计算发电功率（向量化POA）...")
         print(f"   位置数: {n_points:,}")
         print(f"   批处理大小: {self.batch_size}")
+
+        # 预提取数组（避免重复访问DataFrame）
+        solar_zenith = solar_position['apparent_zenith'].values
+        solar_azimuth = solar_position['azimuth'].values
+        dni = irrad_components['dni'].values
+        dhi = irrad_components['dhi'].values
+        ghi = irrad_components['ghi'].values
 
         results = []
 
@@ -250,23 +384,23 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
             for i in range(batch_start, batch_end):
                 surface_azimuth = vehicle_azimuths[i]
 
-                # 使用pvlib计算POA
-                poa_irradiance = pvlib.irradiance.get_total_irradiance(
+                # 🔥 使用向量化POA计算（与RealSceneDL源码一致）
+                poa_result = self._calculate_poa_vectorized(
                     surface_tilt=tilt,
                     surface_azimuth=surface_azimuth,
-                    solar_zenith=solar_position['apparent_zenith'],
-                    solar_azimuth=solar_position['azimuth'],
-                    dni=irrad_components['dni'],
-                    ghi=irrad_components['ghi'],
-                    dhi=irrad_components['dhi'],
-                    model='isotropic'
+                    solar_zenith=solar_zenith,
+                    solar_azimuth=solar_azimuth,
+                    dni=dni,
+                    dhi=dhi,
+                    ghi=ghi,
+                    albedo=0.2
                 )
 
                 # 应用阴影
                 is_shaded = shadow_matrix.iloc[i].values
-                poa_global = poa_irradiance['poa_global'].values * (1 - is_shaded)
-                poa_direct = poa_irradiance['poa_direct'].values * (1 - is_shaded)
-                poa_diffuse = poa_irradiance['poa_diffuse'].values
+                poa_global = poa_result['poa_global'] * (1 - is_shaded)
+                poa_direct = poa_result['poa_direct'] * (1 - is_shaded)
+                poa_diffuse = poa_result['poa_diffuse']  # 散射分量不受直射阴影影响
 
                 # 计算电池温度
                 cell_temp = temperature.sapm_cell(
@@ -409,4 +543,3 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
 if __name__ == "__main__":
     print("GPU加速光伏计算器模块")
-    print("请使用 main_pv_calculation_gpu.py 运行完整流程")

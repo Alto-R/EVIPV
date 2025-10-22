@@ -1,4 +1,10 @@
 data
 *.ps1
 .mcp.json
-
+code/irradiance_data
+code/openmeteo_cache
+code/.claude
+code/__pycache__
+traj
+output
+CLAUDE.md
