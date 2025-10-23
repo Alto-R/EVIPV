@@ -131,9 +131,7 @@ python batch_process_trajectories.py
 ```
 output/
 ├── Z8_pv_generation.csv      # Vehicle Z8 detailed results
-├── Z8_summary.txt             # Vehicle Z8 statistical summary
 ├── 0G_pv_generation.csv      # Vehicle 0G detailed results
-├── 0G_summary.txt             # Vehicle 0G statistical summary
 └── batch_summary.txt          # Batch processing summary
 ```
 
@@ -162,9 +160,7 @@ output/
 │
 ├── output/                                 # Calculation results
 │   ├── Z8_pv_generation.csv               # Vehicle Z8 detailed results
-│   ├── Z8_summary.txt                     # Vehicle Z8 summary
 │   ├── 0G_pv_generation.csv               # Vehicle 0G detailed results
-│   ├── 0G_summary.txt                     # Vehicle 0G summary
 │   └── batch_summary.txt                  # Batch processing summary
 │
 ├── openmeteo_cache/                        # Automatic weather data caching
@@ -272,26 +268,6 @@ Example GeoJSON format:
 | `cell_temp` | Cell temperature | °C |
 | `ac_power` | AC power | W |
 | `energy_kwh` | Energy generation | kWh |
-
-### Statistical Summary TXT (`{vehicle_id}_summary.txt`)
-
-```
-Vehicle PV Generation Summary - Z8
-==================================================
-
-Overall Statistics:
-  Total Energy: 3.45 kWh
-  Average Power: 145.23 W
-  Peak Power: 432.10 W
-  Shaded Ratio: 23.5%
-  Average Cell Temperature: 38.2°C
-  Calculation Time: 18.3 seconds
-
-Hourly Generation (kWh):
-  08:00 - 0.123 kWh (Avg Power: 123.4 W)
-  09:00 - 0.287 kWh (Avg Power: 287.2 W)
-  ...
-```
 
 ### Batch Processing Summary (`batch_summary.txt`)
 
@@ -485,7 +461,7 @@ print(gdf.crs)      # Should be EPSG:4326 (WGS84)
 
 ### PV Modeling
 
-- **Irradiance Model**: Isotropic sky model (consistent with RealSceneDL source code)
+- **Irradiance Model**: Isotropic sky model
 - **POA Calculation**: Manual vectorized POA formula implementation (direct + diffuse + reflected)
 - **Temperature Model**: SAPM cell temperature model
 - **Power Calculation**: Efficiency model with temperature correction

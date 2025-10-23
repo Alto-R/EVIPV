@@ -71,7 +71,10 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
     def calculate_shadows_batch_gpu(self, points_xy, height, times):
         """
-        GPU加速的批量阴影计算（完整GPU流水线）
+        GPU加速的批量阴影计算
+
+        计算每个位置在其对应时间点的阴影状态
+        position[i] 对应 time[i]，共计算 N 条光线
 
         核心优化:
         1. torch在GPU上批量生成光线
@@ -85,17 +88,23 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         height : float
             点的高度(车顶高度，约1.5米)
         times : pandas.DatetimeIndex
-            时间序列
+            时间序列，长度必须等于位置数N
 
         Returns
         -------
-        pandas.DataFrame
-            阴影矩阵，行=位置，列=时间
+        numpy.ndarray
+            阴影数组 (N,)，每个点对应时间的阴影状态
         """
+        n_points = len(points_xy)
+        n_times = len(times)
+
+        # 数据一致性检查
+        if n_points != n_times:
+            raise ValueError(f"位置数({n_points})必须等于时间点数({n_times})")
+
         print(f"\n🌓 GPU加速阴影计算...")
-        print(f"   位置数: {len(points_xy):,}")
-        print(f"   时间点数: {len(times):,}")
-        print(f"   总光线数: {len(points_xy) * len(times):,}")
+        print(f"   轨迹点数: {n_points:,}")
+        print(f"   光线数: {n_points:,} (每个点对应其时间)")
 
         # 获取太阳位置
         solar_position = self.get_sun_position_pvlib(times)
@@ -106,43 +115,45 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
         if len(daytime_indices) == 0:
             print("   ⚠️  所有时间都是夜晚")
-            shadow_matrix = np.ones((len(points_xy), len(times)), dtype=int)
-            return pd.DataFrame(shadow_matrix, columns=times)
+            return np.ones(n_points, dtype=int)
 
         # 白天数据
-        daytime_times = times[daytime_indices]
         daytime_solar_position = solar_position.iloc[daytime_indices]
         sun_vectors = self.sun_position_to_vector(daytime_solar_position)
 
-        print(f"   白天时间点数: {len(daytime_times):,}")
+        print(f"   白天时间点数: {len(daytime_indices):,}")
 
         # 构建查询点
         query_points = np.column_stack([
             points_xy[:, 0],
             points_xy[:, 1],
-            np.full(len(points_xy), height)
+            np.full(n_points, height)
         ])
 
-        n_points = len(query_points)
-        n_times = len(daytime_times)
-
-        # 🔥 GPU加速部分: 批量构建光线
+        # 🔥 GPU加速部分: 轨迹优化光线生成
         if self.device.type == 'cuda' and TORCH_AVAILABLE:
-            print(f"   ⚡ GPU完整流水线加速...")
+            print(f"   ⚡ GPU流水线加速...")
 
             with torch.no_grad():
                 # 转移到GPU
                 query_points_gpu = torch.from_numpy(query_points).float().to(self.device)
                 sun_vectors_gpu = torch.from_numpy(sun_vectors).float().to(self.device)
 
-                # 批量计算光线起点和方向
-                # shape: (n_times, n_points, 3)
-                ray_origins_batch = query_points_gpu.unsqueeze(0) - sun_vectors_gpu.unsqueeze(1) * 5e5
-                ray_directions_batch = sun_vectors_gpu.unsqueeze(1).expand(n_times, n_points, 3)
+                # 仅计算position[i] at time[i]
+                # 过滤出白天的轨迹点
+                diagonal_positions = np.arange(n_points)[mask_daytime]
+                diagonal_times_in_daytime = np.searchsorted(daytime_indices, diagonal_positions)
 
-                # 重塑为 (n_total_rays, 3)
-                all_ray_origins_gpu = ray_origins_batch.reshape(-1, 3)
-                all_ray_directions_gpu = ray_directions_batch.reshape(-1, 3)
+                # 选择对应的点和太阳向量
+                selected_points = query_points_gpu[diagonal_positions]
+                selected_sun_vectors = sun_vectors_gpu[diagonal_times_in_daytime]
+
+                # 生成光线 (n_daytime_rays, 3)
+                ray_origins_gpu = selected_points - selected_sun_vectors * 5e5
+                ray_directions_gpu = selected_sun_vectors
+
+                all_ray_origins_gpu = ray_origins_gpu
+                all_ray_directions_gpu = ray_directions_gpu
 
             print(f"   ✅ GPU光线生成完成")
             print(f"   🎯 GPU光线追踪（triro/OptiX）...")
@@ -176,18 +187,23 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
         else:
             # CPU模式
-            print(f"   🖥️  CPU批量生成光线...")
+            print(f"   🖥️  CPU光线生成...")
+
+            # 仅生成N条光线（轨迹优化）
+            diagonal_positions = np.arange(n_points)[mask_daytime]
+            diagonal_times_in_daytime = np.searchsorted(daytime_indices, diagonal_positions)
+
             all_ray_origins = []
             all_ray_directions = []
 
-            for sun_vec in tqdm(sun_vectors, desc="   生成光线"):
-                ray_origins = query_points - sun_vec * 5e5
-                ray_directions = np.tile(sun_vec, (n_points, 1))
-                all_ray_origins.append(ray_origins)
-                all_ray_directions.append(ray_directions)
+            for pos_idx, time_idx in zip(diagonal_positions, diagonal_times_in_daytime):
+                sun_vec = sun_vectors[time_idx]
+                ray_origin = query_points[pos_idx] - sun_vec * 5e5
+                all_ray_origins.append(ray_origin)
+                all_ray_directions.append(sun_vec)
 
-            all_ray_origins = np.vstack(all_ray_origins)
-            all_ray_directions = np.vstack(all_ray_directions)
+            all_ray_origins = np.array(all_ray_origins)
+            all_ray_directions = np.array(all_ray_directions)
 
             # CPU光线追踪
             print(f"   🎯 CPU光线追踪...")
@@ -199,23 +215,25 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
             intersection_rays = ray_idx_np
             print(f"   ✅ 追踪完成，检测到 {len(intersection_rays):,} 个遮挡")
 
-        # 解析结果
-        shadow_matrix = np.zeros((n_points, len(times)), dtype=int)
+        # 解析结果（轨迹优化模式）
+        shadow_array = np.zeros(n_points, dtype=int)
 
         # 夜晚时间默认为阴影
-        shadow_matrix[:, ~mask_daytime] = 1
+        shadow_array[~mask_daytime] = 1
 
         # 处理白天的阴影
         if len(intersection_rays) > 0:
-            time_indices = intersection_rays // n_points
-            point_indices = intersection_rays % n_points
-            full_time_indices = daytime_indices[time_indices]
-            shadow_matrix[point_indices, full_time_indices] = 1
+            # intersection_rays 中的索引对应 diagonal_positions
+            diagonal_positions = np.arange(n_points)[mask_daytime]
 
-        shaded_ratio = shadow_matrix.sum() / shadow_matrix.size
+            # 被遮挡的轨迹点
+            shaded_positions = diagonal_positions[intersection_rays]
+            shadow_array[shaded_positions] = 1
+
+        shaded_ratio = shadow_array.sum() / shadow_array.size
         print(f"   遮阴比例: {shaded_ratio*100:.2f}%")
 
-        return pd.DataFrame(shadow_matrix, columns=times)
+        return shadow_array
 
     def _calculate_poa_vectorized(self, surface_tilt, surface_azimuth,
                                    solar_zenith, solar_azimuth,
@@ -317,7 +335,10 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
     def calculate_pv_power_gpu(self, times, points_xy, vehicle_azimuths,
                                weather_data=None, tilt=5, height=1.5):
         """
-        GPU加速的光伏功率计算
+        GPU加速的光伏功率计算（轨迹优化）
+
+        计算每个位置在其对应时间点的发电功率
+        position[i] 对应 time[i]，返回 N 条记录
 
         Parameters
         ----------
@@ -337,9 +358,13 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         Returns
         -------
         pandas.DataFrame
-            发电功率和相关参数
+            发电功率和相关参数（N条记录）
         """
         n_points = len(points_xy)
+        n_times = len(times)
+
+        if n_points != n_times:
+            raise ValueError(f"位置数({n_points})必须等于时间点数({n_times})")
 
         print("\n" + "="*60)
         print("💡 GPU加速光伏功率计算")
@@ -349,7 +374,7 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         solar_position = self.get_sun_position_pvlib(times)
 
         # GPU加速阴影计算
-        shadow_matrix = self.calculate_shadows_batch_gpu(points_xy, height, times)
+        shadow_result = self.calculate_shadows_batch_gpu(points_xy, height, times)
 
         # 获取辐照度数据
         print("\n☀️  处理辐照度数据...")
@@ -363,11 +388,6 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
             temp_air = np.full(len(times), 25.0)
             wind_speed = np.full(len(times), 2.0)
 
-        # 批量计算发电功率
-        print(f"\n⚡ 批量计算发电功率（向量化POA）...")
-        print(f"   位置数: {n_points:,}")
-        print(f"   批处理大小: {self.batch_size}")
-
         # 预提取数组（避免重复访问DataFrame）
         solar_zenith = solar_position['apparent_zenith'].values
         solar_azimuth = solar_position['azimuth'].values
@@ -375,95 +395,71 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         dhi = irrad_components['dhi'].values
         ghi = irrad_components['ghi'].values
 
+        # 轨迹优化计算：每个点只计算对应时间
+        print(f"\n⚡ 逐点计算发电功率...")
+        print(f"   轨迹点数: {n_points:,}")
+
         results = []
 
-        # 批处理循环
-        for batch_start in tqdm(range(0, n_points, self.batch_size), desc="   计算进度"):
-            batch_end = min(batch_start + self.batch_size, n_points)
+        for i in tqdm(range(n_points), desc="   计算进度"):
+            surface_azimuth = vehicle_azimuths[i]
 
-            for i in range(batch_start, batch_end):
-                surface_azimuth = vehicle_azimuths[i]
+            # 只计算当前时间点（索引i）
+            poa_result = self._calculate_poa_vectorized(
+                surface_tilt=tilt,
+                surface_azimuth=surface_azimuth,
+                solar_zenith=solar_zenith[i:i+1],  # 单个时间点
+                solar_azimuth=solar_azimuth[i:i+1],
+                dni=dni[i:i+1],
+                dhi=dhi[i:i+1],
+                ghi=ghi[i:i+1],
+                albedo=0.2
+            )
 
-                # 🔥 使用向量化POA计算（与RealSceneDL源码一致）
-                poa_result = self._calculate_poa_vectorized(
-                    surface_tilt=tilt,
-                    surface_azimuth=surface_azimuth,
-                    solar_zenith=solar_zenith,
-                    solar_azimuth=solar_azimuth,
-                    dni=dni,
-                    dhi=dhi,
-                    ghi=ghi,
-                    albedo=0.2
-                )
+            # 应用阴影（单个值）
+            is_shaded = shadow_result[i]
+            poa_global = poa_result['poa_global'][0] * (1 - is_shaded)
+            poa_direct = poa_result['poa_direct'][0] * (1 - is_shaded)
+            poa_diffuse = poa_result['poa_diffuse'][0]
 
-                # 应用阴影
-                is_shaded = shadow_matrix.iloc[i].values
-                poa_global = poa_result['poa_global'] * (1 - is_shaded)
-                poa_direct = poa_result['poa_direct'] * (1 - is_shaded)
-                poa_diffuse = poa_result['poa_diffuse']  # 散射分量不受直射阴影影响
+            # 计算电池温度
+            cell_temp = temperature.sapm_cell(
+                poa_global=np.array([poa_global]),
+                temp_air=temp_air[i:i+1],
+                wind_speed=wind_speed[i:i+1],
+                a=-3.56,
+                b=-0.075,
+                deltaT=3
+            )[0]
 
-                # 计算电池温度
-                cell_temp = temperature.sapm_cell(
-                    poa_global=poa_global,
-                    temp_air=temp_air,
-                    wind_speed=wind_speed,
-                    a=-3.56,
-                    b=-0.075,
-                    deltaT=3
-                )
+            # 功率计算
+            gamma_pdc = self.module_parameters['gamma_pdc']
+            temp_ref = self.module_parameters['temp_ref']
+            pdc0_per_m2 = 1000 * self.panel_efficiency
 
-                # GPU加速功率计算（如果可用）
-                if self.device.type == 'cuda' and TORCH_AVAILABLE:
-                    with torch.no_grad():
-                        poa_global_gpu = torch.from_numpy(poa_global).float().to(self.device)
-                        cell_temp_gpu = torch.from_numpy(cell_temp).float().to(self.device)
+            temp_correction = 1 + gamma_pdc * (cell_temp - temp_ref)
+            dc_power = (poa_global / 1000) * pdc0_per_m2 * self.panel_area * temp_correction
+            dc_power = max(dc_power, 0)
 
-                        # DC功率
-                        gamma_pdc = self.module_parameters['gamma_pdc']
-                        temp_ref = self.module_parameters['temp_ref']
-                        pdc0_per_m2 = 1000 * self.panel_efficiency
+            eta_inv = self.inverter_parameters['eta_inv_nom']
+            ac_power = dc_power * eta_inv
 
-                        temp_correction = 1 + gamma_pdc * (cell_temp_gpu - temp_ref)
-                        dc_power_gpu = (poa_global_gpu / 1000) * pdc0_per_m2 * self.panel_area * temp_correction
-                        dc_power_gpu = torch.clamp(dc_power_gpu, min=0)
-
-                        # AC功率
-                        eta_inv = self.inverter_parameters['eta_inv_nom']
-                        ac_power_gpu = dc_power_gpu * eta_inv
-
-                        # 转回CPU
-                        dc_power = dc_power_gpu.cpu().numpy()
-                        ac_power = ac_power_gpu.cpu().numpy()
-                else:
-                    # CPU计算
-                    gamma_pdc = self.module_parameters['gamma_pdc']
-                    temp_ref = self.module_parameters['temp_ref']
-                    pdc0_per_m2 = 1000 * self.panel_efficiency
-
-                    temp_correction = 1 + gamma_pdc * (cell_temp - temp_ref)
-                    dc_power = (poa_global / 1000) * pdc0_per_m2 * self.panel_area * temp_correction
-                    dc_power = np.clip(dc_power, 0, None)
-
-                    eta_inv = self.inverter_parameters['eta_inv_nom']
-                    ac_power = dc_power * eta_inv
-
-                # 保存结果
-                result_df = pd.DataFrame({
-                    'time': times,
-                    'location_idx': i,
-                    'vehicle_azimuth': surface_azimuth,
-                    'is_shaded': is_shaded,
-                    'poa_global': poa_global,
-                    'poa_direct': poa_direct,
-                    'poa_diffuse': poa_diffuse,
-                    'cell_temp': cell_temp,
-                    'dc_power': dc_power,
-                    'ac_power': ac_power,
-                })
-                results.append(result_df)
+            # 保存结果（单条记录）
+            results.append({
+                'time': times[i],
+                'location_idx': i,
+                'vehicle_azimuth': surface_azimuth,
+                'is_shaded': is_shaded,
+                'poa_global': poa_global,
+                'poa_direct': poa_direct,
+                'poa_diffuse': poa_diffuse,
+                'cell_temp': cell_temp,
+                'dc_power': dc_power,
+                'ac_power': ac_power,
+            })
 
         print(f"   ✅ 计算完成")
-        return pd.concat(results, ignore_index=True)
+        return pd.DataFrame(results)
 
     def process_trajectory(self, trajectory_df, weather_data=None):
         """
@@ -524,20 +520,24 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
             weather_data=weather_data
         )
 
-        # 合并结果
+        # 合并结果（power_results是N×1对应，直接设置索引合并）
         power_results['datetime'] = power_results['time']
         power_results.set_index('datetime', inplace=True)
 
+        # 合并原始轨迹数据和计算结果
         merged = resampled.join(power_results[['is_shaded', 'poa_global', 'cell_temp',
-                                              'dc_power', 'ac_power']])
+                                              'dc_power', 'ac_power', 'poa_direct', 'poa_diffuse']])
 
         # 计算能量
         merged['time_delta_hours'] = self.time_resolution_minutes / 60.0
         merged['energy_kwh'] = merged['ac_power'] / 1000 * merged['time_delta_hours']
 
+        # 确保索引有名字，然后重置索引
+        merged.index.name = 'datetime'
         merged.reset_index(inplace=True)
 
         print("\n✅ 轨迹处理完成")
+        print(f"   输出记录数: {len(merged):,}")
         return merged
 
 

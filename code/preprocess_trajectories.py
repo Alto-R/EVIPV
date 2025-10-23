@@ -8,15 +8,31 @@
 4. 提取车辆ID（英文标识）
 5. 保存为标准CSV格式
 
-使用示例：
+使用方法：
+    在脚本内部修改CONFIG配置后直接运行：
     python preprocess_trajectories.py
-    python preprocess_trajectories.py --input traj/Z8.csv
 """
 
 import pandas as pd
-import argparse
 from pathlib import Path
 from datetime import datetime
+
+
+# ==================== 配置参数 ====================
+CONFIG = {
+    # 处理模式：'single' 处理单个文件，'batch' 批量处理目录下所有文件
+    'mode': 'batch',
+
+    # 单文件模式：指定输入文件路径
+    'input_file': 'traj/Z8.csv',
+
+    # 批量模式：指定输入目录
+    'input_dir': 'traj',
+
+    # 输出目录
+    'output_dir': 'traj'
+}
+# =================================================
 
 
 def extract_vehicle_id(raw_id):
@@ -221,42 +237,41 @@ def preprocess_all_trajectories(input_dir='traj', output_dir='traj'):
 
 
 def main():
-    """主函数"""
-    parser = argparse.ArgumentParser(
-        description='预处理轨迹CSV文件（添加表头、解析datetime等）'
-    )
-    parser.add_argument(
-        '--input', '-i',
-        help='输入CSV文件路径（不指定则处理traj目录下所有CSV）'
-    )
-    parser.add_argument(
-        '--input-dir',
-        default='traj',
-        help='输入目录（默认: traj）'
-    )
-    parser.add_argument(
-        '--output-dir',
-        default='traj',
-        help='输出目录（默认: traj）'
-    )
+    """
+    主函数
 
-    args = parser.parse_args()
+    根据CONFIG配置运行预处理任务
+    """
+    print("\n" + "="*60)
+    print("轨迹数据预处理")
+    print("="*60)
+    print(f"处理模式: {CONFIG['mode']}")
+
+    if CONFIG['mode'] == 'single':
+        print(f"输入文件: {CONFIG['input_file']}")
+    else:
+        print(f"输入目录: {CONFIG['input_dir']}")
+
+    print(f"输出目录: {CONFIG['output_dir']}")
+    print("="*60)
 
     try:
-        if args.input:
+        if CONFIG['mode'] == 'single':
             # 处理单个文件
             vehicle_id, output_path, stats = preprocess_trajectory(
-                args.input,
-                args.output_dir
+                CONFIG['input_file'],
+                CONFIG['output_dir']
             )
             print(f"\n✅ 预处理完成: {output_path}")
-        else:
+        elif CONFIG['mode'] == 'batch':
             # 批量处理
             all_stats = preprocess_all_trajectories(
-                args.input_dir,
-                args.output_dir
+                CONFIG['input_dir'],
+                CONFIG['output_dir']
             )
             print(f"\n✅ 批量预处理完成")
+        else:
+            raise ValueError(f"无效的处理模式: {CONFIG['mode']}，请使用 'single' 或 'batch'")
 
     except Exception as e:
         print(f"\n❌ 错误: {e}")

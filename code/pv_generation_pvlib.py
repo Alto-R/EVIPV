@@ -228,8 +228,17 @@ class SolarPVCalculator:
         x, y : np.ndarray
             模型坐标系下的x, y坐标（z由height参数指定）
         """
+        # 确保 height 的形状和 lon/lat 一致
+        lon_array = np.atleast_1d(lon)
+        lat_array = np.atleast_1d(lat)
+        height_array = np.atleast_1d(height)
+
+        # 如果 height 是标量但 lon/lat 是数组，扩展 height
+        if height_array.size == 1 and lon_array.size > 1:
+            height_array = np.full_like(lon_array, height_array[0], dtype=float)
+
         # 使用RealSceneDL转换
-        coords_3dtiles = convert_wgs84_to_3dtiles(lon, lat, height)
+        coords_3dtiles = convert_wgs84_to_3dtiles(lon_array, lat_array, height_array)
 
         # coords_3dtiles shape: (N, 3) 或 (3,)
         if coords_3dtiles.ndim == 1:

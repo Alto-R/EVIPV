@@ -129,9 +129,7 @@ python batch_process_trajectories.py
 ```
 output/
 ├── Z8_pv_generation.csv      # 车辆Z8详细结果
-├── Z8_summary.txt             # 车辆Z8统计摘要
 ├── 0G_pv_generation.csv      # 车辆0G详细结果
-├── 0G_summary.txt             # 车辆0G统计摘要
 └── batch_summary.txt          # 所有车辆汇总报告
 ```
 
@@ -159,9 +157,7 @@ traj/
 
 output/
 ├── Z8_pv_generation.csv             # 车辆Z8详细结果
-├── Z8_summary.txt                   # 车辆Z8统计摘要
 ├── 0G_pv_generation.csv             # 车辆0G详细结果
-├── 0G_summary.txt                   # 车辆0G统计摘要
 └── batch_summary.txt                # 批处理汇总
 
 openmeteo_cache/                     # 气象数据自动缓存
@@ -263,26 +259,6 @@ GeoJSON格式示例：
 | `cell_temp` | 电池温度 | °C |
 | `ac_power` | 交流功率 | W |
 | `energy_kwh` | 发电量 | kWh |
-
-### 统计摘要 TXT (`{vehicle_id}_summary.txt`)
-
-```
-Vehicle PV Generation Summary - Z8
-==================================================
-
-Overall Statistics:
-  Total Energy: 3.45 kWh
-  Average Power: 145.23 W
-  Peak Power: 432.10 W
-  Shaded Ratio: 23.5%
-  Average Cell Temperature: 38.2°C
-  Calculation Time: 18.3 seconds
-
-Hourly Generation (kWh):
-  08:00 - 0.123 kWh (Avg Power: 123.4 W)
-  09:00 - 0.287 kWh (Avg Power: 287.2 W)
-  ...
-```
 
 ### 批处理汇总 (`batch_summary.txt`)
 
@@ -475,7 +451,7 @@ print(gdf.crs)      # 应为 EPSG:4326 (WGS84)
 
 ### 光伏建模
 
-- **辐照度模型**: 各向同性天空模型（与RealSceneDL源码一致）
+- **辐照度模型**: 各向同性天空模型
 - **POA计算**: 手动实现向量化POA公式（直射+散射+反射）
 - **温度模型**: SAPM电池温度模型
 - **功率计算**: 带温度修正的效率模型

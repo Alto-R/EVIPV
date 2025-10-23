@@ -363,11 +363,6 @@ def main():
             print(f"   ✅ PV Generation: {result_csv}")
             print(f"      Size: {file_size_mb:.2f} MB, Records: {len(result_df):,}")
 
-            # 统计摘要
-            summary_txt = output_dir / f"{vehicle_id}_summary.txt"
-            save_summary(result_df, vehicle_id, summary_txt, elapsed_time, config)
-            print(f"   ✅ Summary: {summary_txt}")
-
             # 收集统计
             stats = calculate_stats(result_df)
             all_stats[vehicle_id] = {
