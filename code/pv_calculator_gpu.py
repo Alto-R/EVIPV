@@ -497,10 +497,45 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         print(f"时间分辨率: {self.time_resolution_minutes} 分钟")
         print(f"总时间点数: {len(full_times):,}")
 
-        # 重采样轨迹
+        # 重采样轨迹（使用线性插值）
         trajectory_df.set_index('datetime', inplace=True)
         resampled = trajectory_df.resample(f'{self.time_resolution_minutes}min').first()
-        resampled = resampled.reindex(full_times, method='ffill')
+        resampled = resampled.reindex(full_times)
+
+        # 对位置进行线性插值
+        resampled['lng'] = resampled['lng'].interpolate(method='linear', limit_direction='both')
+        resampled['lat'] = resampled['lat'].interpolate(method='linear', limit_direction='both')
+
+        # 根据插值后的位置重新计算角度（沿着轨迹方向）
+        lng_diff = resampled['lng'].diff().fillna(0)
+        lat_diff = resampled['lat'].diff().fillna(0)
+        # 使用arctan2计算方位角（从北顺时针），转换为0-360度
+        resampled['angle'] = np.degrees(np.arctan2(lng_diff, lat_diff)) % 360
+        # 对于第一个点或相邻点位置相同的情况，用前向填充
+        resampled['angle'] = resampled['angle'].replace(0, np.nan).fillna(method='ffill').fillna(method='bfill')
+
+        # 根据插值后的位置重新计算速度（两点间距离/时间间隔）
+        # 使用haversine公式计算相邻点之间的实际距离（单位：米）
+        lat1 = np.radians(resampled['lat'].shift(1))
+        lat2 = np.radians(resampled['lat'])
+        lng1 = np.radians(resampled['lng'].shift(1))
+        lng2 = np.radians(resampled['lng'])
+
+        dlat = lat2 - lat1
+        dlng = lng2 - lng1
+
+        # Haversine公式
+        a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlng/2)**2
+        c = 2 * np.arcsin(np.sqrt(a))
+        earth_radius_m = 6371000  # 地球半径（米）
+        distance_m = earth_radius_m * c
+
+        # 计算速度（米/秒转换为公里/小时）
+        time_interval_hours = self.time_resolution_minutes / 60.0
+        resampled['speed'] = (distance_m / 1000) / time_interval_hours  # km/h
+        # 第一个点的速度用第二个点的速度填充
+        resampled['speed'] = resampled['speed'].fillna(method='bfill').fillna(0)
+
         resampled = resampled.dropna(subset=['lng', 'lat', 'angle'])
 
         if len(resampled) == 0:

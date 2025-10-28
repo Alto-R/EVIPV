@@ -6,16 +6,29 @@
 2. 添加标准列名
 3. 解析datetime格式
 4. 提取车辆ID（英文标识）
-5. 保存为标准CSV格式
+5. 使用 transbigdata 进行数据清洗：
+   - 清理边界外数据（深圳区域）
+   - 清理冗余重复记录
+   - 清理漂移异常点（速度/距离/角度）
+6. 支持并行处理多个文件
+7. 保存为标准CSV格式
 
 使用方法：
     在脚本内部修改CONFIG配置后直接运行：
     python preprocess_trajectories.py
+
+配置说明：
+    - mode: 'single' 处理单个文件, 'batch' 批量处理
+    - parallel: True/False 是否启用并行处理（仅批量模式有效）
+    - n_workers: 并行工作进程数（None=自动检测CPU核心数）
 """
 
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
+import transbigdata as tbd
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
 
 
 # ==================== 配置参数 ====================
@@ -27,10 +40,14 @@ CONFIG = {
     'input_file': 'traj/Z8.csv',
 
     # 批量模式：指定输入目录
-    'input_dir': 'traj',
+    'input_dir': '../traj',
 
     # 输出目录
-    'output_dir': 'traj'
+    'output_dir': '../traj',
+
+    # 并行处理配置
+    'parallel': True,           # 是否启用并行处理
+    'n_workers': 10           # 并行工作进程数（None = 自动使用 CPU 核心数）
 }
 # =================================================
 
@@ -104,14 +121,16 @@ def preprocess_trajectory(input_path, output_dir='traj'):
     # 数据验证
     print("✅ 数据验证...")
 
-    # 检查坐标范围（深圳区域）
-    invalid_coords = (
-        (df['lng'] < 113) | (df['lng'] > 115) |
-        (df['lat'] < 22) | (df['lat'] > 23.5)
+    # 使用 transbigdata 清理边界外数据（深圳区域）
+    records_before = len(df)
+    df = tbd.clean_outofbounds(
+        df,
+        bounds=[113, 22, 115, 23],  # [lng_min, lat_min, lng_max, lat_max]
+        col=['lng', 'lat']
     )
-    if invalid_coords.sum() > 0:
-        print(f"   ⚠️  发现 {invalid_coords.sum()} 条坐标异常记录")
-        df = df[~invalid_coords]
+    removed_coords = records_before - len(df)
+    if removed_coords > 0:
+        print(f"   ⚠️  [transbigdata] 移除 {removed_coords} 条边界外记录")
 
     # 检查角度范围
     invalid_angle = (df['angle'] < 0) | (df['angle'] > 359)
@@ -119,11 +138,28 @@ def preprocess_trajectory(input_path, output_dir='traj'):
         print(f"   ⚠️  发现 {invalid_angle.sum()} 条角度异常记录")
         df = df[~invalid_angle]
 
-    # 移除重复时间戳
-    duplicates = df.duplicated(subset=['datetime'], keep='first')
-    if duplicates.sum() > 0:
-        print(f"   ⚠️  移除 {duplicates.sum()} 条重复时间戳")
-        df = df[~duplicates]
+    # 使用 transbigdata 清理重复记录
+    records_before = len(df)
+    df = tbd.traj_clean_redundant(
+        df,
+        col=['vehicle_id', 'datetime', 'lng', 'lat']
+    )
+    removed_duplicates = records_before - len(df)
+    if removed_duplicates > 0:
+        print(f"   ⚠️  [transbigdata] 移除 {removed_duplicates} 条冗余记录")
+
+    # 使用 transbigdata 清理漂移异常点（综合速度、距离、角度）
+    records_before = len(df)
+    df = tbd.traj_clean_drift(
+        df,
+        col=['vehicle_id', 'datetime', 'lng', 'lat'],
+        speedlimit=100,      # 速度上限 100 km/h
+        dislimit=1000,      # 距离上限 1000 米
+        anglelimit=30       # 角度变化上限 30 度
+    )
+    removed_drift = records_before - len(df)
+    if removed_drift > 0:
+        print(f"   ⚠️  [transbigdata] 移除 {removed_drift} 条漂移异常点")
 
     # 统计信息
     stats = {
@@ -166,7 +202,32 @@ def preprocess_trajectory(input_path, output_dir='traj'):
     return vehicle_id, output_path, stats
 
 
-def preprocess_all_trajectories(input_dir='traj', output_dir='traj'):
+def _process_single_file(args):
+    """
+    单个文件处理的包装函数（用于并行处理）
+
+    Parameters
+    ----------
+    args : tuple
+        (csv_file, output_dir)
+
+    Returns
+    -------
+    tuple or None
+        成功时返回 (vehicle_id, stats)，失败时返回 None
+    """
+    csv_file, output_dir = args
+    try:
+        vehicle_id, output_path, stats = preprocess_trajectory(csv_file, output_dir)
+        return (vehicle_id, stats)
+    except Exception as e:
+        print(f"\n❌ 处理 {csv_file.name} 失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def preprocess_all_trajectories(input_dir='traj', output_dir='traj', parallel=False, n_workers=None):
     """
     批量预处理所有轨迹文件
 
@@ -176,6 +237,10 @@ def preprocess_all_trajectories(input_dir='traj', output_dir='traj'):
         输入目录
     output_dir : str
         输出目录
+    parallel : bool
+        是否启用并行处理
+    n_workers : int or None
+        并行工作进程数（None = 自动使用 CPU 核心数）
 
     Returns
     -------
@@ -199,19 +264,48 @@ def preprocess_all_trajectories(input_dir='traj', output_dir='traj'):
     for f in csv_files:
         print(f"  - {f.name}")
 
-    all_stats = {}
+    if parallel and len(csv_files) > 1:
+        # 并行处理模式
+        if n_workers is None:
+            n_workers = os.cpu_count()
+        print(f"\n🚀 启用并行处理模式（{n_workers} 个工作进程）")
 
-    for csv_file in csv_files:
-        try:
-            vehicle_id, output_path, stats = preprocess_trajectory(
-                csv_file, output_dir
-            )
-            all_stats[vehicle_id] = stats
-        except Exception as e:
-            print(f"\n❌ 处理 {csv_file.name} 失败: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
+        all_stats = {}
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            # 提交所有任务
+            future_to_file = {
+                executor.submit(_process_single_file, (csv_file, output_dir)): csv_file
+                for csv_file in csv_files
+            }
+
+            # 收集结果
+            completed = 0
+            for future in as_completed(future_to_file):
+                completed += 1
+                result = future.result()
+                if result is not None:
+                    vehicle_id, stats = result
+                    all_stats[vehicle_id] = stats
+                print(f"   进度: {completed}/{len(csv_files)}")
+    else:
+        # 串行处理模式
+        if parallel:
+            print(f"\n⚠️  文件数量少于2个，使用串行处理")
+        else:
+            print(f"\n📝 使用串行处理模式")
+
+        all_stats = {}
+        for csv_file in csv_files:
+            try:
+                vehicle_id, output_path, stats = preprocess_trajectory(
+                    csv_file, output_dir
+                )
+                all_stats[vehicle_id] = stats
+            except Exception as e:
+                print(f"\n❌ 处理 {csv_file.name} 失败: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
 
     # 汇总报告
     print(f"\n{'='*60}")
@@ -253,6 +347,11 @@ def main():
         print(f"输入目录: {CONFIG['input_dir']}")
 
     print(f"输出目录: {CONFIG['output_dir']}")
+    if CONFIG['mode'] == 'batch':
+        print(f"并行处理: {'启用' if CONFIG['parallel'] else '禁用'}")
+        if CONFIG['parallel']:
+            workers = CONFIG['n_workers'] or os.cpu_count()
+            print(f"工作进程数: {workers}")
     print("="*60)
 
     try:
@@ -267,7 +366,9 @@ def main():
             # 批量处理
             all_stats = preprocess_all_trajectories(
                 CONFIG['input_dir'],
-                CONFIG['output_dir']
+                CONFIG['output_dir'],
+                parallel=CONFIG['parallel'],
+                n_workers=CONFIG['n_workers']
             )
             print(f"\n✅ 批量预处理完成")
         else:
