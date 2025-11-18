@@ -1,12 +1,19 @@
 """
-批量处理轨迹数据 - 单GPU串行计算
+批量处理轨迹数据 - 单GPU串行计算（多文件夹版本）
 
 功能：
-1. 自动发现所有预处理后的轨迹文件
-2. 为每个轨迹自动匹配对应日期的气象数据（缓存/API）
-3. 串行处理每个轨迹（GPU内部高度并行）
-4. 保存简化的输出文件（扁平结构，全英文命名）
-5. 生成批处理汇总报告
+1. 按顺序处理多个文件夹（01, 02, 04, 05-12）
+2. 自动发现每个文件夹中的预处理轨迹文件
+3. 为每个轨迹自动匹配对应日期的气象数据（缓存/API）
+4. 串行处理每个轨迹（GPU内部高度并行）
+5. 保存简化的输出文件到对应的output_XX文件夹
+6. 为每个文件夹生成独立的批处理汇总报告
+
+文件夹结构：
+    traj/01/              → 输出到 output_01/
+    traj/02/              → 输出到 output_02/
+    traj/04/              → 输出到 output_04/
+    traj/05-12/           → 输出到 output_05 - output_12/
 
 使用示例：
     # 使用内部CONFIG配置（推荐）
@@ -14,6 +21,15 @@
 
     # 使用外部config.yaml（可选）
     python batch_process_trajectories.py --config config.yaml
+
+    # 指定使用GPU 0
+    python batch_process_trajectories.py --gpu 0
+
+    # 指定使用GPU 1
+    python batch_process_trajectories.py --gpu 1
+
+    # 组合使用
+    python batch_process_trajectories.py --config config.yaml --gpu 1
 """
 
 import os
@@ -54,6 +70,7 @@ CONFIG = {
     'computation': {
         'time_resolution_minutes': 1,  # 时间分辨率
         'use_gpu': True,               # 启用GPU
+        'gpu_id': 0,                   # GPU编号 (0, 1, 2...), None=自动选择
         'batch_size': 100,             # 批处理大小
         'mesh_grid_size': None,        # mesh网格大小(m), None=不细分
     },
@@ -225,6 +242,12 @@ def main():
         default=None,
         help='外部配置文件路径（可选，不指定则使用脚本内部CONFIG）'
     )
+    parser.add_argument(
+        '--gpu', '-g',
+        type=int,
+        default=None,
+        help='指定GPU编号 (0, 1, 2...), 不指定则使用配置文件中的设置'
+    )
 
     args = parser.parse_args()
 
@@ -245,30 +268,30 @@ def main():
         print("📋 使用脚本内部CONFIG配置")
         config = CONFIG
 
-    output_dir = Path(config['output']['output_dir'])
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # GPU设置：命令行参数优先于配置文件
+    gpu_id = args.gpu if args.gpu is not None else config['computation'].get('gpu_id', 0)
 
-    # 查找轨迹文件
-    print("\n" + "="*80)
-    print("Step 1: Discover Trajectory Files")
+    if config['computation']['use_gpu'] and gpu_id is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        print(f"🎮 GPU设置: 使用GPU {gpu_id}")
+        print(f"   环境变量: CUDA_VISIBLE_DEVICES={gpu_id}")
+    elif config['computation']['use_gpu']:
+        print(f"🎮 GPU设置: 使用默认GPU（自动选择）")
+    else:
+        print(f"💻 GPU设置: GPU已禁用，使用CPU")
+
     print("="*80)
 
-    traj_dir = config['data_sources'].get('trajectory_dir', 'traj')
-    traj_files = find_processed_trajectories(traj_dir)
+    # 定义要处理的文件夹列表
+    folder_ids = ['01', '02', '04', '05', '06', '07', '08', '09', '10', '11', '12']
+    base_traj_dir = Path(config['data_sources']['trajectory_dir'])  # 从配置中读取轨迹基础目录
 
-    if not traj_files:
-        print(f"❌ No processed trajectory files found in {traj_dir}/")
-        print("   Please run preprocess_trajectories.py first!")
-        return 1
+    print(f"\n📁 将按顺序处理以下文件夹: {', '.join([str(base_traj_dir / fid) for fid in folder_ids])}")
+    print("="*80)
 
-    print(f"✅ Found {len(traj_files)} processed trajectory files:")
-    for f in traj_files:
-        vehicle_id = f.stem.replace('_processed', '')
-        print(f"  - {f.name} → Vehicle ID: {vehicle_id}")
-
-    # 准备建筑mesh
+    # 准备建筑mesh（所有文件夹共享）
     print("\n" + "="*80)
-    print("Step 2: Load Building Mesh (Shared by All Vehicles)")
+    print("Preparing Building Mesh (Shared by All Folders)")
     print("="*80)
 
     mesh_path = Path(config['output']['mesh_path'])
@@ -286,9 +309,9 @@ def main():
             grid_size=config['computation']['mesh_grid_size']
         )
 
-    # 初始化GPU计算器
+    # 初始化GPU计算器（所有文件夹共享）
     print("\n" + "="*80)
-    print("Step 3: Initialize GPU Calculator (Shared by All Vehicles)")
+    print("Initialize GPU Calculator (Shared by All Folders)")
     print("="*80)
 
     calculator = GPUAcceleratedSolarPVCalculator(
@@ -302,109 +325,143 @@ def main():
         batch_size=config['computation']['batch_size']
     )
 
-    # 批量处理轨迹
-    print("\n" + "="*80)
-    print("Step 4: Process Each Vehicle Trajectory (Serial with GPU)")
-    print("="*80)
+    # 外层循环：遍历每个文件夹
+    for folder_idx, folder_id in enumerate(folder_ids, 1):
+        print("\n\n" + "="*80)
+        print(f"{'='*80}")
+        print(f"  Processing Folder {folder_idx}/{len(folder_ids)}: {folder_id}")
+        print(f"{'='*80}")
+        print("="*80 + "\n")
 
-    all_stats = {}
+        # 设置当前文件夹的输入输出路径
+        traj_dir = base_traj_dir / folder_id  # traj/01, traj/02, ...
+        output_dir = Path(f'output_{folder_id}')  # output_01, output_02, ...
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    for idx, traj_file in enumerate(traj_files, 1):
-        vehicle_id = traj_file.stem.replace('_processed', '')
+        # 查找轨迹文件
+        print("="*80)
+        print(f"Step 1: Discover Trajectory Files in Folder {folder_id}")
+        print("="*80)
 
-        print(f"\n{'='*80}")
-        print(f"Processing Vehicle {idx}/{len(traj_files)}: {vehicle_id}")
-        print('='*80)
+        traj_files = find_processed_trajectories(traj_dir)
 
-        try:
-            # 读取轨迹
-            print(f"\n📂 Loading trajectory: {traj_file.name}")
-            trajectory_df = pd.read_csv(traj_file)
-            trajectory_df['datetime'] = pd.to_datetime(trajectory_df['datetime'])
-            print(f"   Records: {len(trajectory_df):,}")
-
-            # 推断日期范围
-            start_date = trajectory_df['datetime'].min().strftime('%Y-%m-%d')
-            end_date = trajectory_df['datetime'].max().strftime('%Y-%m-%d')
-            print(f"   Date Range: {start_date} to {end_date}")
-
-            # 获取气象数据（自动缓存/API）
-            print(f"\n☀️  Fetching Irradiance Data (Auto Cache/API)...")
-            irradiance_data = fetch_and_cache_irradiance_data(
-                lat=config['location']['lat'],
-                lon=config['location']['lon'],
-                start_date=start_date,
-                end_date=end_date,
-                granularity='1min' if config['computation']['time_resolution_minutes'] == 1 else '1hour',
-                save_csv=False,  # 不额外保存CSV（已有缓存）
-                output_dir='irradiance_data'
-            )
-
-            weather_data = convert_to_pvlib_format(irradiance_data)
-
-            # GPU计算
-            print(f"\n⚡ Calculating PV Generation (GPU Accelerated)...")
-            start_time = time.time()
-
-            result_df = calculator.process_trajectory(
-                trajectory_df,
-                weather_data=weather_data
-            )
-
-            elapsed_time = time.time() - start_time
-
-            # 保存结果（简化文件结构）
-            print(f"\n💾 Saving Results...")
-
-            # 详细结果
-            result_csv = output_dir / f"{vehicle_id}_pv_generation.csv"
-            result_df.to_csv(result_csv, index=False)
-            file_size_mb = result_csv.stat().st_size / (1024 * 1024)
-            print(f"   ✅ PV Generation: {result_csv}")
-            print(f"      Size: {file_size_mb:.2f} MB, Records: {len(result_df):,}")
-
-            # 收集统计
-            stats = calculate_stats(result_df)
-            all_stats[vehicle_id] = {
-                'stats': stats,
-                'elapsed_time': elapsed_time
-            }
-
-            print(f"\n📊 Quick Stats:")
-            print(f"   Total Energy: {stats['total_energy_kwh']:.2f} kWh")
-            print(f"   Avg Power: {stats['avg_power_w']:.2f} W")
-            print(f"   Peak Power: {stats['max_power_w']:.2f} W")
-            print(f"   Calculation Time: {elapsed_time:.1f}s")
-
-        except Exception as e:
-            print(f"\n❌ Error processing {vehicle_id}: {e}")
-            import traceback
-            traceback.print_exc()
+        if not traj_files:
+            print(f"⚠️  No processed trajectory files found in {traj_dir}/")
+            print(f"   Skipping folder {folder_id}...")
             continue
 
-    # 保存批处理汇总
-    print("\n" + "="*80)
-    print("Step 5: Generate Batch Summary")
+        print(f"✅ Found {len(traj_files)} processed trajectory files:")
+        for f in traj_files:
+            vehicle_id = f.stem.replace('_processed', '')
+            print(f"  - {f.name} → Vehicle ID: {vehicle_id}")
+
+        # 批量处理当前文件夹的轨迹
+        print("\n" + "="*80)
+        print(f"Step 2: Process Trajectories in Folder {folder_id}")
+        print("="*80)
+
+        all_stats = {}
+
+        for idx, traj_file in enumerate(traj_files, 1):
+            vehicle_id = traj_file.stem.replace('_processed', '')
+
+            print(f"\n{'='*80}")
+            print(f"Processing Vehicle {idx}/{len(traj_files)}: {vehicle_id}")
+            print('='*80)
+
+            try:
+                # 读取轨迹
+                print(f"\n📂 Loading trajectory: {traj_file.name}")
+                trajectory_df = pd.read_csv(traj_file)
+                trajectory_df['datetime'] = pd.to_datetime(trajectory_df['datetime'])
+                print(f"   Records: {len(trajectory_df):,}")
+
+                # 推断日期范围
+                start_date = trajectory_df['datetime'].min().strftime('%Y-%m-%d')
+                end_date = trajectory_df['datetime'].max().strftime('%Y-%m-%d')
+                print(f"   Date Range: {start_date} to {end_date}")
+
+                # 获取气象数据（自动缓存/API）
+                print(f"\n☀️  Fetching Irradiance Data (Auto Cache/API)...")
+                irradiance_data = fetch_and_cache_irradiance_data(
+                    lat=config['location']['lat'],
+                    lon=config['location']['lon'],
+                    start_date=start_date,
+                    end_date=end_date,
+                    granularity='1min' if config['computation']['time_resolution_minutes'] == 1 else '1hour',
+                    save_csv=False,  # 不额外保存CSV（已有缓存）
+                    output_dir='irradiance_data'
+                )
+
+                weather_data = convert_to_pvlib_format(irradiance_data)
+
+                # GPU计算
+                print(f"\n⚡ Calculating PV Generation (GPU Accelerated)...")
+                start_time = time.time()
+
+                result_df = calculator.process_trajectory(
+                    trajectory_df,
+                    weather_data=weather_data
+                )
+
+                elapsed_time = time.time() - start_time
+
+                # 保存结果（简化文件结构）
+                print(f"\n💾 Saving Results...")
+
+                # 详细结果
+                result_csv = output_dir / f"{vehicle_id}_pv_generation.csv"
+                result_df.to_csv(result_csv, index=False)
+                file_size_mb = result_csv.stat().st_size / (1024 * 1024)
+                print(f"   ✅ PV Generation: {result_csv}")
+                print(f"      Size: {file_size_mb:.2f} MB, Records: {len(result_df):,}")
+
+                # 收集统计
+                stats = calculate_stats(result_df)
+                all_stats[vehicle_id] = {
+                    'stats': stats,
+                    'elapsed_time': elapsed_time
+                }
+
+                print(f"\n📊 Quick Stats:")
+                print(f"   Total Energy: {stats['total_energy_kwh']:.2f} kWh")
+                print(f"   Avg Power: {stats['avg_power_w']:.2f} W")
+                print(f"   Peak Power: {stats['max_power_w']:.2f} W")
+                print(f"   Calculation Time: {elapsed_time:.1f}s")
+
+            except Exception as e:
+                print(f"\n❌ Error processing {vehicle_id}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+
+        # 保存当前文件夹的批处理汇总
+        print("\n" + "="*80)
+        print(f"Step 3: Generate Summary for Folder {folder_id}")
+        print("="*80)
+
+        if all_stats:
+            batch_summary_path = output_dir / "batch_summary.txt"
+            save_batch_summary(all_stats, batch_summary_path)
+            print(f"✅ Batch Summary: {batch_summary_path}")
+
+            print(f"\n📊 Folder {folder_id} Processing Summary:")
+            print(f"   Successfully Processed: {len(all_stats)} vehicles")
+            total_energy = sum(s['stats']['total_energy_kwh'] for s in all_stats.values())
+            total_time = sum(s['elapsed_time'] for s in all_stats.values())
+            print(f"   Total Energy (All Vehicles): {total_energy:.2f} kWh")
+            print(f"   Total Calculation Time: {total_time:.1f}s ({total_time/60:.1f} min)")
+        else:
+            print(f"❌ No vehicles processed successfully in folder {folder_id}")
+
+        print(f"\n✅ Folder {folder_id} Processing Complete!")
+
+    # 完成所有处理
+    print("\n\n" + "="*80)
     print("="*80)
-
-    if all_stats:
-        batch_summary_path = output_dir / "batch_summary.txt"
-        save_batch_summary(all_stats, batch_summary_path)
-        print(f"✅ Batch Summary: {batch_summary_path}")
-
-        print(f"\n📊 Batch Processing Summary:")
-        print(f"   Successfully Processed: {len(all_stats)} vehicles")
-        total_energy = sum(s['stats']['total_energy_kwh'] for s in all_stats.values())
-        total_time = sum(s['elapsed_time'] for s in all_stats.values())
-        print(f"   Total Energy (All Vehicles): {total_energy:.2f} kWh")
-        print(f"   Total Calculation Time: {total_time:.1f}s ({total_time/60:.1f} min)")
-    else:
-        print("❌ No vehicles processed successfully")
-
-    # 完成
-    print("\n" + "="*80)
-    print("✅ Batch Processing Complete!")
+    print("✅ All Folders Processing Complete!")
     print(f"End Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*80)
     print("="*80 + "\n")
 
     return 0
