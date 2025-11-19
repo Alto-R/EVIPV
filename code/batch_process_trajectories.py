@@ -155,8 +155,8 @@ CONFIG = {
         'gpu_id': 1,                   # GPU编号 (0, 1, 2...), None=自动选择
         'mesh_grid_size': None,        # mesh网格大小(m), None=不细分
         'clone_to_all_months': True,   # 是否克隆到全年12个月
-        'max_vehicles': None,          # 最大处理车辆数, None=不限制
-        'vehicles_per_batch': 1,      # 每批GPU同时处理的车辆数（充分利用显存）
+        'max_vehicles': 1000,          # 最大处理车辆数, None=不限制
+        'vehicles_per_batch': 200,      # 每批GPU同时处理的车辆数（充分利用显存）
     },
     'output': {
         'mesh_path': 'data/shenzhen_building_mesh.ply',
