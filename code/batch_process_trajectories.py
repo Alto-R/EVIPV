@@ -152,11 +152,11 @@ CONFIG = {
     'computation': {
         'time_resolution_minutes': 1,  # 时间分辨率
         'use_gpu': True,               # 启用GPU
-        'gpu_id': 0,                   # GPU编号 (0, 1, 2...), None=自动选择
-        'batch_size': 10000,             # 批处理大小
+        'gpu_id': 1,                   # GPU编号 (0, 1, 2...), None=自动选择
         'mesh_grid_size': None,        # mesh网格大小(m), None=不细分
         'clone_to_all_months': True,   # 是否克隆到全年12个月
         'max_vehicles': None,          # 最大处理车辆数, None=不限制
+        'vehicles_per_batch': 1,      # 每批GPU同时处理的车辆数（充分利用显存）
     },
     'output': {
         'mesh_path': 'data/shenzhen_building_mesh.ply',
@@ -224,10 +224,9 @@ def calculate_stats(result_df):
         'time_range': (result_df['datetime'].min(), result_df['datetime'].max()),
     }
 
-    # 按月统计
-    if 'month' in result_df.columns:
-        monthly_energy = result_df.groupby('month')['energy_kwh'].sum().to_dict()
-        stats['monthly_energy_kwh'] = monthly_energy
+    # 按月统计（全年模式下month列必然存在）
+    monthly_energy = result_df.groupby('month')['energy_kwh'].sum().to_dict()
+    stats['monthly_energy_kwh'] = monthly_energy
 
     return stats
 
@@ -257,18 +256,16 @@ def save_batch_summary(all_stats, output_path):
         f.write(f"  Total Energy (All Vehicles, Full Year): {total_energy:.2f} kWh\n")
         f.write(f"  Total Calculation Time: {total_time:.1f} seconds ({total_time/60:.1f} min)\n\n")
 
-        # 按月汇总
+        # 按月汇总（全年模式下monthly_energy_kwh必然存在）
         monthly_totals = {}
         for vehicle_id, data in all_stats.items():
-            if 'monthly_energy_kwh' in data['stats']:
-                for month, energy in data['stats']['monthly_energy_kwh'].items():
-                    monthly_totals[month] = monthly_totals.get(month, 0) + energy
+            for month, energy in data['stats']['monthly_energy_kwh'].items():
+                monthly_totals[month] = monthly_totals.get(month, 0) + energy
 
-        if monthly_totals:
-            f.write("Monthly Energy Summary (All Vehicles):\n")
-            for month in sorted(monthly_totals.keys()):
-                f.write(f"  Month {month:02d}: {monthly_totals[month]:.2f} kWh\n")
-            f.write("\n")
+        f.write("Monthly Energy Summary (All Vehicles):\n")
+        for month in sorted(monthly_totals.keys()):
+            f.write(f"  Month {month:02d}: {monthly_totals[month]:.2f} kWh\n")
+        f.write("\n")
 
         f.write("Per-Vehicle Statistics:\n")
         f.write("-"*60 + "\n")
@@ -283,11 +280,10 @@ def save_batch_summary(all_stats, output_path):
             f.write(f"  Shaded Ratio: {stats['shaded_ratio']*100:.1f}%\n")
             f.write(f"  Calculation Time: {data['elapsed_time']:.1f}s\n")
 
-            # 显示每月发电量
-            if 'monthly_energy_kwh' in stats:
-                f.write(f"  Monthly Breakdown:\n")
-                for month in sorted(stats['monthly_energy_kwh'].keys()):
-                    f.write(f"    Month {month:02d}: {stats['monthly_energy_kwh'][month]:.2f} kWh\n")
+            # 显示每月发电量（全年模式下必然存在）
+            f.write(f"  Monthly Breakdown:\n")
+            for month in sorted(stats['monthly_energy_kwh'].keys()):
+                f.write(f"    Month {month:02d}: {stats['monthly_energy_kwh'][month]:.2f} kWh\n")
 
 
 def main():
@@ -424,8 +420,7 @@ def main():
         panel_area=config['pv_system']['panel_area'],
         panel_efficiency=config['pv_system']['panel_efficiency'],
         time_resolution_minutes=config['computation']['time_resolution_minutes'],
-        use_gpu=config['computation']['use_gpu'],
-        batch_size=config['computation']['batch_size']
+        use_gpu=config['computation']['use_gpu']
     )
 
     print(f"   ✅ GPU计算器初始化完成，耗时: {time.time() - calc_init_start:.2f}s", flush=True)
@@ -451,172 +446,214 @@ def main():
     print(f"✅ Found {len(traj_files)} processed trajectory files:")
     for f in traj_files:
         vehicle_id = f.stem.replace('_processed', '')
-        print(f"  - {f.name} → Vehicle ID: {vehicle_id}")
+    print(f" → Vehicle ID")
 
     # 批量处理轨迹
     print("\n" + "="*80)
-    print("Step 2: Process Trajectories (Full Year)")
+    print("Step 2: Process Trajectories (Full Year - Batch Mode)")
     print("="*80)
-
+          
     all_stats = {}
+    vehicles_per_batch = config['computation'].get('vehicles_per_batch', 1)
 
-    for idx, traj_file in enumerate(traj_files, 1):
-        vehicle_id = traj_file.stem.replace('_processed', '')
+    print(f"\n⚡ Batch Configuration:")
+    print(f"   Total vehicles: {len(traj_files)}")
+    print(f"   Vehicles per batch: {vehicles_per_batch}")
+    print(f"   Total batches: {(len(traj_files) + vehicles_per_batch - 1) // vehicles_per_batch}")
+    print(f"   Expected GPU memory saving: ~{vehicles_per_batch}x speedup\n")
+
+    # 分批处理车辆
+    for batch_idx in range(0, len(traj_files), vehicles_per_batch):
+        batch_files = traj_files[batch_idx:batch_idx + vehicles_per_batch]
+        batch_num = batch_idx // vehicles_per_batch + 1
+        total_batches = (len(traj_files) + vehicles_per_batch - 1) // vehicles_per_batch
 
         print(f"\n{'='*80}")
-        print(f"Processing Vehicle {idx}/{len(traj_files)}: {vehicle_id}")
+        print(f"📦 Processing Batch {batch_num}/{total_batches} ({len(batch_files)} vehicles)")
         print('='*80)
 
-        try:
-            # 读取轨迹
-            print(f"\n📂 Loading trajectory: {traj_file.name}", flush=True)
+        batch_start_time = time.time()
 
-            trajectory_df = pd.read_csv(traj_file)
-            trajectory_df['datetime'] = pd.to_datetime(trajectory_df['datetime'])
+        # 存储批次中所有车辆的数据
+        batch_trajectories = {}  # {vehicle_id: full_year_traj}
 
-            # 确保时间戳有时区信息（与气象数据匹配）
-            if trajectory_df['datetime'].dt.tz is None:
-                trajectory_df['datetime'] = trajectory_df['datetime'].dt.tz_localize('Asia/Shanghai')
+        # 1️⃣ 读取并准备批次中所有车辆的轨迹
+        for idx, traj_file in enumerate(batch_files, 1):
+            vehicle_id = traj_file.stem.replace('_processed', '')
 
-            print(f"   Records: {len(trajectory_df):,}", flush=True)
+            print(f"\n--- Vehicle {batch_idx + idx}/{len(traj_files)}: {vehicle_id} ---")
 
-            # 检测源月份
-            source_month = detect_source_month(trajectory_df)
-            print(f"   Source Month: {source_month}", flush=True)
+            try:
+                # 读取轨迹
+                print(f"📂 Loading trajectory: {traj_file.name}", flush=True)
+                trajectory_df = pd.read_csv(traj_file)
+                trajectory_df['datetime'] = pd.to_datetime(trajectory_df['datetime'])
 
-            # 确定要处理的月份
-            if clone_to_all_months:
-                months_to_process = list(range(1, 13))
-                print(f"   Months to Process: 1-12 (Full Year)", flush=True)
-            else:
-                months_to_process = [source_month]
-                print(f"   Months to Process: {source_month} only", flush=True)
-
-            # 获取年份用于气象数据
-            base_year = trajectory_df['datetime'].dt.year.mode()[0]
-
-            # 存储所有月份的结果
-            all_monthly_results = []
-            vehicle_start_time = time.time()
-
-            for target_month in months_to_process:
-                print(f"\n📅 Processing Month {target_month:02d}/12...", flush=True)
-
-                # 克隆轨迹到目标月份
-                if target_month == source_month:
-                    month_traj_df = trajectory_df.copy()
-                    dropped_rows = 0
+                # 确保时区统一为 Asia/Shanghai
+                if trajectory_df['datetime'].dt.tz is None:
+                    trajectory_df['datetime'] = trajectory_df['datetime'].dt.tz_localize('Asia/Shanghai')
                 else:
-                    month_traj_df, dropped_rows = clone_trajectory_to_month(
-                        trajectory_df, target_month
-                    )
+                    trajectory_df['datetime'] = trajectory_df['datetime'].dt.tz_convert('Asia/Shanghai')
 
-                if dropped_rows > 0:
-                    print(f"   ⚠️  Dropped {dropped_rows} rows (invalid dates)", flush=True)
+                print(f"   Records: {len(trajectory_df):,}", flush=True)
 
-                if len(month_traj_df) == 0:
-                    print(f"   ⚠️  No valid records for month {target_month}, skipping", flush=True)
+                # 检测源月份
+                source_month = detect_source_month(trajectory_df)
+                print(f"   Source Month: {source_month}", flush=True)
+
+                # 确定要处理的月份
+                clone_to_all_months = config['computation'].get('clone_to_all_months', True)
+                if clone_to_all_months:
+                    months_to_process = list(range(1, 13))
+                else:
+                    months_to_process = [source_month]
+
+                # 克隆轨迹到所有月份
+                print(f"   Cloning to {len(months_to_process)} months...", flush=True)
+                all_monthly_trajs = []
+                total_dropped = 0
+
+                for target_month in months_to_process:
+                    if target_month == source_month:
+                        month_traj_df = trajectory_df.copy()
+                        dropped_rows = 0
+                    else:
+                        month_traj_df, dropped_rows = clone_trajectory_to_month(
+                            trajectory_df, target_month
+                        )
+                        total_dropped += dropped_rows
+
+                    if len(month_traj_df) > 0:
+                        month_traj_df['month'] = target_month
+                        all_monthly_trajs.append(month_traj_df)
+
+                if total_dropped > 0:
+                    print(f"   ⚠️  Dropped {total_dropped} invalid dates", flush=True)
+
+                if not all_monthly_trajs:
+                    print(f"   ⚠️  No valid data, skipping", flush=True)
                     continue
 
-                # 推断日期范围
-                start_date = month_traj_df['datetime'].min().strftime('%Y-%m-%d')
-                end_date = month_traj_df['datetime'].max().strftime('%Y-%m-%d')
+                # 合并全年数据
+                full_year_traj = pd.concat(all_monthly_trajs, ignore_index=True)
 
-                # 获取气象数据
-                print(f"   ☀️  Fetching irradiance data: {start_date} to {end_date}", flush=True)
+                # 🔄 重要：在合并前先重采样每个车辆的轨迹
+                print(f"   🔄 Resampling trajectory ({len(full_year_traj):,} → resampled)...", flush=True)
+                resampled_traj = calculator.resample_trajectory(full_year_traj)
 
-                irrad_start = time.time()
-                irradiance_data = fetch_and_cache_irradiance_data(
-                    lat=config['location']['lat'],
-                    lon=config['location']['lon'],
-                    start_date=start_date,
-                    end_date=end_date,
-                    granularity='1min' if config['computation']['time_resolution_minutes'] == 1 else '1hour',
-                    save_csv=False,
-                    output_dir='irradiance_data'
-                )
-                weather_data = convert_to_pvlib_format(irradiance_data)
-                print(f"   ✅ Weather data ready ({time.time() - irrad_start:.1f}s)", flush=True)
+                # 🔧 修复：resample_trajectory 现在返回 DatetimeIndex，需要重置为列以便后续操作
+                resampled_traj.reset_index(inplace=True)
 
-                # GPU计算
-                print(f"   ⚡ Calculating PV generation...", flush=True)
-                calc_start = time.time()
+                # 添加车辆ID和月份标识
+                resampled_traj['vehicle_id'] = vehicle_id
+                # 直接从datetime提取月份
+                resampled_traj['month'] = resampled_traj['datetime'].dt.month
 
-                result_df = calculator.process_trajectory(
-                    month_traj_df,
-                    weather_data=weather_data
-                )
+                batch_trajectories[vehicle_id] = resampled_traj
 
-                # 添加月份列
-                result_df['month'] = target_month
-
-                all_monthly_results.append(result_df)
-
-                month_energy = result_df['energy_kwh'].sum()
-                print(f"   ✅ Month {target_month:02d}: {month_energy:.2f} kWh ({time.time() - calc_start:.1f}s)", flush=True)
-
-                # 清理中间变量
-                del month_traj_df, irradiance_data, weather_data, result_df
-                gc.collect()
-
-            # 合并所有月份结果
-            if all_monthly_results:
-                combined_result = pd.concat(all_monthly_results, ignore_index=True)
-
-                elapsed_time = time.time() - vehicle_start_time
-
-                # 保存结果
-                print(f"\n💾 Saving Results...", flush=True)
-                result_csv = output_dir / f"{vehicle_id}_pv_generation.csv"
-                combined_result.to_csv(result_csv, index=False)
-                file_size_mb = result_csv.stat().st_size / (1024 * 1024)
-                print(f"   ✅ Saved: {result_csv}", flush=True)
-                print(f"      Size: {file_size_mb:.2f} MB, Records: {len(combined_result):,}", flush=True)
-
-                # 收集统计
-                stats = calculate_stats(combined_result)
-                all_stats[vehicle_id] = {
-                    'stats': stats,
-                    'elapsed_time': elapsed_time
-                }
-
-                print(f"\n📊 Vehicle Summary:", flush=True)
-                print(f"   Total Energy (Full Year): {stats['total_energy_kwh']:.2f} kWh", flush=True)
-                print(f"   Avg Power: {stats['avg_power_w']:.2f} W", flush=True)
-                print(f"   Peak Power: {stats['max_power_w']:.2f} W", flush=True)
-                print(f"   Calculation Time: {elapsed_time:.1f}s", flush=True)
+                print(f"   ✅ Prepared: {len(resampled_traj):,} records (resampled)", flush=True)
 
                 # 清理
-                del combined_result, all_monthly_results
-            else:
-                print(f"\n⚠️  No results generated for {vehicle_id}", flush=True)
+                del trajectory_df, all_monthly_trajs
 
-            # 清理内存
-            del trajectory_df
-            gc.collect()
+            except Exception as e:
+                print(f"   ❌ Error preparing {vehicle_id}: {e}", flush=True)
+                continue
 
-            if config['computation']['use_gpu']:
-                try:
-                    import torch
-                    torch.cuda.empty_cache()
-                except:
-                    pass
-
-        except Exception as e:
-            print(f"\n❌ Error processing {vehicle_id}: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-
-            # 清理内存
-            gc.collect()
-            if config['computation']['use_gpu']:
-                try:
-                    import torch
-                    torch.cuda.empty_cache()
-                except:
-                    pass
-
+        if not batch_trajectories:
+            print(f"\n⚠️  No valid vehicles in this batch, skipping")
             continue
+
+        # 2️⃣ 合并批次中所有车辆的轨迹
+        print(f"\n🔗 Merging {len(batch_trajectories)} vehicles for batch GPU processing...")
+        merged_batch_traj = pd.concat(batch_trajectories.values(), ignore_index=True)
+        print(f"   Total records (all vehicles): {len(merged_batch_traj):,}")
+
+        # 推断日期范围（全批次）
+        start_date = merged_batch_traj['datetime'].min().strftime('%Y-%m-%d')
+        end_date = merged_batch_traj['datetime'].max().strftime('%Y-%m-%d')
+        print(f"   Date range: {start_date} to {end_date}")
+
+        # 3️⃣ 获取全年气象数据（批次共享）
+        print(f"\n☀️  Fetching full-year irradiance data...", flush=True)
+        irrad_start = time.time()
+        irradiance_data = fetch_and_cache_irradiance_data(
+            lat=config['location']['lat'],
+            lon=config['location']['lon'],
+            start_date=start_date,
+            end_date=end_date,
+            granularity='1min' if config['computation']['time_resolution_minutes'] == 1 else '1hour',
+            save_csv=False,
+            output_dir='irradiance_data'
+        )
+        weather_data = convert_to_pvlib_format(irradiance_data)
+        print(f"   ✅ Weather data ready ({time.time() - irrad_start:.1f}s)", flush=True)
+
+        # 4️⃣ 一次性GPU计算整个批次
+        print(f"\n⚡ GPU Batch Calculation ({len(batch_trajectories)} vehicles simultaneously)...", flush=True)
+        print(f"   合并数据大小: {len(merged_batch_traj):,} 行", flush=True)
+        print(f"   内存估算: {merged_batch_traj.memory_usage(deep=True).sum() / 1024**2:.1f} MB", flush=True)
+        calc_start = time.time()
+
+        print(f"   开始调用 calculator.process_trajectory()...", flush=True)
+        batch_result_df = calculator.process_trajectory(
+            merged_batch_traj,
+            weather_data=weather_data,
+            skip_resample=True  # 已在外层对每个车辆单独重采样
+        )
+        print(f"   ✅ process_trajectory 返回成功", flush=True)
+
+        calc_time = time.time() - calc_start
+        print(f"   ✅ Batch GPU calculation complete ({calc_time:.1f}s)", flush=True)
+        print(f"   Average time per vehicle: {calc_time/len(batch_trajectories):.1f}s", flush=True)
+
+        # 5️⃣ 验证vehicle_id和month信息已在结果中
+        # （skip_resample=True 应该保证这些列存在）
+        assert 'vehicle_id' in batch_result_df.columns, "vehicle_id列丢失，请检查process_trajectory逻辑"
+        assert 'month' in batch_result_df.columns, "month列丢失，请检查process_trajectory逻辑"
+        print(f"   ✅ vehicle_id和month信息已保留在结果中")
+
+        # 6️⃣ 拆分结果并保存每个车辆（使用groupby优化）
+        print(f"\n💾 Splitting and saving results...")
+        for vehicle_id, vehicle_result in batch_result_df.groupby('vehicle_id'):
+            # 移除临时列
+            vehicle_result = vehicle_result.drop(columns=['vehicle_id'])
+
+            # 显示月度统计（全年模式下month列必然存在）
+            month_stats = []
+            for month in sorted(vehicle_result['month'].unique()):
+                month_energy = vehicle_result[vehicle_result['month'] == month]['energy_kwh'].sum()
+                month_stats.append(f"{month:02d}:{month_energy:.1f}kWh")
+            print(f"   {vehicle_id}: {', '.join(month_stats)}", flush=True)
+
+            # 保存结果
+            result_csv = output_dir / f"{vehicle_id}_pv_generation.csv"
+            vehicle_result.to_csv(result_csv, index=False)
+            file_size_mb = result_csv.stat().st_size / (1024 * 1024)
+
+            # 收集统计
+            stats = calculate_stats(vehicle_result)
+            all_stats[vehicle_id] = {
+                'stats': stats,
+                'elapsed_time': calc_time / len(batch_trajectories)  # 均摊时间
+            }
+
+            print(f"   ✅ {vehicle_id}: {file_size_mb:.1f}MB, {len(vehicle_result):,} records, {stats['total_energy_kwh']:.1f}kWh", flush=True)
+
+        # 清理批次数据
+        batch_elapsed = time.time() - batch_start_time
+        print(f"\n✅ Batch {batch_num} complete: {batch_elapsed:.1f}s ({batch_elapsed/len(batch_trajectories):.1f}s per vehicle)")
+
+        del merged_batch_traj, batch_result_df, batch_trajectories, irradiance_data, weather_data
+        gc.collect()
+
+        if config['computation']['use_gpu']:
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except:
+                pass
+
 
     # 保存批处理汇总
     print("\n" + "="*80)
