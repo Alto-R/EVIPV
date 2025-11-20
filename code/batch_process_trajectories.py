@@ -19,8 +19,17 @@
     # 指定使用GPU 0
     python batch_process_trajectories.py --gpu 0
 
+    # 计算车辆范围 [101:200]（1-based索引）
+    python batch_process_trajectories.py --vehicle-range 101:200
+
+    # 计算从第501辆到末尾
+    python batch_process_trajectories.py --vehicle-range 501:
+
+    # 计算前100辆（等同于 --vehicle-range 1:100）
+    python batch_process_trajectories.py --vehicle-range :100
+
     # 组合使用
-    python batch_process_trajectories.py --config config.yaml --gpu 1
+    python batch_process_trajectories.py --config config.yaml --gpu 1 --vehicle-range 1:50
 """
 
 import os
@@ -155,8 +164,12 @@ CONFIG = {
         'gpu_id': 1,                   # GPU编号 (0, 1, 2...), None=自动选择
         'mesh_grid_size': None,        # mesh网格大小(m), None=不细分
         'clone_to_all_months': True,   # 是否克隆到全年12个月
-        'max_vehicles': 1000,          # 最大处理车辆数, None=不限制
-        'vehicles_per_batch': 200,      # 每批GPU同时处理的车辆数（充分利用显存）
+        'max_vehicles': 1000,          # 最大处理车辆数, None=不限制（若使用vehicle_range将忽略此参数）
+        'vehicle_range': None,         # 车辆索引区间（1-based），格式: "起始:结束" 或 [起始, 结束]
+                                       # 示例: "101:200" 表示处理第101到200辆车
+                                       # "501:" 表示从第501辆到末尾, ":100" 表示前100辆
+                                       # None 表示使用 max_vehicles 参数
+        'vehicles_per_batch': 200,     # 每批GPU同时处理的车辆数（充分利用显存）
     },
     'output': {
         'mesh_path': 'data/shenzhen_building_mesh.ply',
@@ -198,6 +211,41 @@ def find_processed_trajectories(traj_dir='traj'):
     traj_files = list(traj_dir.glob('*_processed.csv'))
 
     return sorted(traj_files)
+
+
+def parse_vehicle_range(range_value):
+    """
+    解析车辆区间配置，支持字符串 "a:b" 或长度为2的列表/元组
+    返回 (start, end)，1-based索引，end为None表示到末尾
+    """
+    if range_value is None:
+        return None
+
+    start, end = None, None
+
+    if isinstance(range_value, str):
+        if ':' not in range_value:
+            raise ValueError("vehicle_range 字符串格式应为 'a:b'")
+        start_str, end_str = range_value.split(':', 1)
+        start = int(start_str) if start_str.strip() else None
+        end = int(end_str) if end_str.strip() else None
+    elif isinstance(range_value, (list, tuple)):
+        if len(range_value) != 2:
+            raise ValueError("vehicle_range 列表/元组长度必须为2，例如 [1, 100]")
+        start = int(range_value[0]) if range_value[0] is not None else None
+        end = int(range_value[1]) if range_value[1] is not None else None
+    else:
+        raise ValueError("vehicle_range 仅支持字符串 'a:b' 或长度为2的列表/元组")
+
+    if start is not None and start < 1:
+        raise ValueError("vehicle_range 起始索引必须>=1")
+    if end is not None and end < 1:
+        raise ValueError("vehicle_range 结束索引必须>=1")
+
+    if end is not None and start is not None and end < start:
+        raise ValueError("vehicle_range 结束索引必须大于等于起始索引")
+
+    return start, end
 
 
 def calculate_stats(result_df):
@@ -301,6 +349,12 @@ def main():
         type=int,
         default=None,
         help='指定GPU编号 (0, 1, 2...), 不指定则使用配置文件中的设置'
+    )
+    parser.add_argument(
+        '--vehicle-range', '-r',
+        type=str,
+        default=None,
+        help="车辆索引区间，格式 'a:b'（1-based，b可省略表示到末尾，示例：--vehicle-range 101:200）"
     )
 
     args = parser.parse_args()
@@ -437,16 +491,48 @@ def main():
         print(f"   请确保轨迹文件以 '_processed.csv' 结尾")
         return 1
 
-    # 限制最大车辆数
-    max_vehicles = config['computation'].get('max_vehicles', None)
-    if max_vehicles and len(traj_files) > max_vehicles:
-        print(f"⚠️  Found {len(traj_files)} files, limiting to first {max_vehicles}")
-        traj_files = traj_files[:max_vehicles]
+    print(f"✅ Found {len(traj_files)} processed trajectory files in total")
 
-    print(f"✅ Found {len(traj_files)} processed trajectory files:")
-    for f in traj_files:
-        vehicle_id = f.stem.replace('_processed', '')
-    print(f" → Vehicle ID")
+    # 车辆筛选：优先使用 vehicle_range，否则使用 max_vehicles
+    # 命令行参数 > 配置文件
+    vehicle_range_arg = args.vehicle_range if args.vehicle_range else config['computation'].get('vehicle_range', None)
+
+    if vehicle_range_arg:
+        # 使用范围筛选
+        try:
+            start_idx, end_idx = parse_vehicle_range(vehicle_range_arg)
+
+            # 保存原始文件总数（用于显示）
+            total_files = len(traj_files)
+
+            # 转换为0-based索引
+            start_0based = (start_idx - 1) if start_idx else 0
+            end_0based = end_idx if end_idx else total_files
+
+            # 验证范围有效性
+            if start_0based < 0:
+                start_0based = 0
+            if end_0based > total_files:
+                end_0based = total_files
+            if start_0based >= total_files:
+                print(f"❌ 错误: 起始索引 {start_idx} 超出范围（共 {total_files} 个文件）")
+                return 1
+
+            traj_files = traj_files[start_0based:end_0based]
+            print(f"📌 使用车辆范围: [{start_idx if start_idx else 1}:{end_idx if end_idx else total_files}]")
+            print(f"   选择了 {len(traj_files)} 个车辆（索引 {start_0based+1} 到 {end_0based}）")
+
+        except ValueError as e:
+            print(f"❌ 错误: vehicle_range 参数格式错误 - {e}")
+            return 1
+    else:
+        # 使用 max_vehicles 限制
+        max_vehicles = config['computation'].get('max_vehicles', None)
+        if max_vehicles and len(traj_files) > max_vehicles:
+            print(f"⚠️  限制为前 {max_vehicles} 个车辆")
+            traj_files = traj_files[:max_vehicles]
+        else:
+            print(f"📌 处理所有 {len(traj_files)} 个车辆")
 
     # 批量处理轨迹
     print("\n" + "="*80)
@@ -661,9 +747,9 @@ def main():
     print("="*80)
 
     if all_stats:
-        batch_summary_path = output_dir / "batch_summary.txt"
-        save_batch_summary(all_stats, batch_summary_path)
-        print(f"✅ Batch Summary: {batch_summary_path}")
+        # batch_summary_path = output_dir / "batch_summary.txt"
+        # save_batch_summary(all_stats, batch_summary_path)
+        # print(f"✅ Batch Summary: {batch_summary_path}")
 
         print(f"\n📊 Processing Summary:")
         print(f"   Successfully Processed: {len(all_stats)} vehicles")
