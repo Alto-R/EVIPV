@@ -164,7 +164,7 @@ CONFIG = {
         'gpu_id': 1,                   # GPU编号 (0, 1, 2...), None=自动选择
         'mesh_grid_size': None,        # mesh网格大小(m), None=不细分
         'clone_to_all_months': True,   # 是否克隆到全年12个月
-        'max_vehicles': 1000,          # 最大处理车辆数, None=不限制（若使用vehicle_range将忽略此参数）
+        'max_vehicles': 1110,          # 最大处理车辆数, None=不限制（若使用vehicle_range将忽略此参数）
         'vehicle_range': None,         # 车辆索引区间（1-based），格式: "起始:结束" 或 [起始, 结束]
                                        # 示例: "101:200" 表示处理第101到200辆车
                                        # "501:" 表示从第501辆到末尾, ":100" 表示前100辆
@@ -587,6 +587,14 @@ def main():
                 source_month = detect_source_month(trajectory_df)
                 print(f"   Source Month: {source_month}", flush=True)
 
+                # 🆕 过滤：只保留源月份的数据
+                # records_before_filter = len(trajectory_df)
+                trajectory_df = trajectory_df[trajectory_df['datetime'].dt.month == source_month].copy()
+                # filtered_count = records_before_filter - len(trajectory_df)
+                # if filtered_count > 0:
+                #     print(f"   🔍 Filtered out {filtered_count:,} records from other months", flush=True)
+                # print(f"   ✅ Kept {len(trajectory_df):,} records from month {source_month}", flush=True)
+
                 # 确定要处理的月份
                 clone_to_all_months = config['computation'].get('clone_to_all_months', True)
                 if clone_to_all_months:
@@ -594,18 +602,26 @@ def main():
                 else:
                     months_to_process = [source_month]
 
-                # 克隆轨迹到所有月份
-                print(f"   Cloning to {len(months_to_process)} months...", flush=True)
+                # ⚡ 优化：先重采样原始数据（小数据集），再克隆到12个月
+                print(f"   🔄 Resampling source trajectory ({len(trajectory_df):,} → resampled)...", flush=True)
+                resampled_source = calculator.resample_trajectory(trajectory_df)
+
+                # resample_trajectory 返回 DatetimeIndex，需要重置为列
+                resampled_source.reset_index(inplace=True)
+                print(f"      ✅ Resampled to {len(resampled_source):,} records", flush=True)
+
+                # 克隆重采样后的数据到所有月份
+                print(f"   📋 Cloning resampled data to {len(months_to_process)} months...", flush=True)
                 all_monthly_trajs = []
                 total_dropped = 0
 
                 for target_month in months_to_process:
                     if target_month == source_month:
-                        month_traj_df = trajectory_df.copy()
+                        month_traj_df = resampled_source.copy()
                         dropped_rows = 0
                     else:
                         month_traj_df, dropped_rows = clone_trajectory_to_month(
-                            trajectory_df, target_month
+                            resampled_source, target_month
                         )
                         total_dropped += dropped_rows
 
@@ -614,33 +630,24 @@ def main():
                         all_monthly_trajs.append(month_traj_df)
 
                 if total_dropped > 0:
-                    print(f"   ⚠️  Dropped {total_dropped} invalid dates", flush=True)
+                    print(f"      ⚠️  Dropped {total_dropped} invalid dates", flush=True)
 
                 if not all_monthly_trajs:
                     print(f"   ⚠️  No valid data, skipping", flush=True)
                     continue
 
-                # 合并全年数据
+                # 合并全年数据（已经是重采样后的数据）
                 full_year_traj = pd.concat(all_monthly_trajs, ignore_index=True)
 
-                # 🔄 重要：在合并前先重采样每个车辆的轨迹
-                print(f"   🔄 Resampling trajectory ({len(full_year_traj):,} → resampled)...", flush=True)
-                resampled_traj = calculator.resample_trajectory(full_year_traj)
+                # 添加车辆ID（month列已在上面添加）
+                full_year_traj['vehicle_id'] = vehicle_id
 
-                # 🔧 修复：resample_trajectory 现在返回 DatetimeIndex，需要重置为列以便后续操作
-                resampled_traj.reset_index(inplace=True)
+                batch_trajectories[vehicle_id] = full_year_traj
 
-                # 添加车辆ID和月份标识
-                resampled_traj['vehicle_id'] = vehicle_id
-                # 直接从datetime提取月份
-                resampled_traj['month'] = resampled_traj['datetime'].dt.month
-
-                batch_trajectories[vehicle_id] = resampled_traj
-
-                print(f"   ✅ Prepared: {len(resampled_traj):,} records (resampled)", flush=True)
+                print(f"   ✅ Prepared: {len(full_year_traj):,} records ({len(months_to_process)} months)", flush=True)
 
                 # 清理
-                del trajectory_df, all_monthly_trajs
+                del trajectory_df, resampled_source, all_monthly_trajs
 
             except Exception as e:
                 print(f"   ❌ Error preparing {vehicle_id}: {e}", flush=True)
@@ -685,7 +692,7 @@ def main():
         batch_result_df = calculator.process_trajectory(
             merged_batch_traj,
             weather_data=weather_data,
-            skip_resample=True  # 已在外层对每个车辆单独重采样
+            skip_resample=True  # ⚡ 已在外层重采样：先对原始数据重采样，再克隆到12个月
         )
         print(f"   ✅ process_trajectory 返回成功", flush=True)
 

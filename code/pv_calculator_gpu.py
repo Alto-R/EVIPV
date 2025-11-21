@@ -76,13 +76,9 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
     def get_sun_position_pvlib(self, times):
         """
-        使用pvlib计算太阳位置（GPU优化版本：自动去重）
+        使用pvlib计算太阳位置（GPU优化版：添加诊断输出）
 
-        相比父类方法，添加了时间去重优化：
-        - 对于批量处理场景，时间点可能大量重复
-        - 只计算唯一时间点，然后reindex回原始序列
-        - 可将95,526,983个时间点 → ~500,000个唯一时间点
-        - 速度提升：50-100倍
+        继承基类的时间去重优化，额外添加详细日志输出
 
         Parameters
         ----------
@@ -103,7 +99,7 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         elif str(times.tz) != 'Asia/Shanghai':
             times = times.tz_convert('Asia/Shanghai')
 
-        # 🚀 关键优化：去重计算
+        # 🚀 时间去重（继承自基类）
         unique_times = times.unique()
 
         # 输出去重统计
@@ -122,11 +118,9 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
     def get_irradiance_components(self, times, weather_data):
         """
-        获取辐照度分量（GPU优化版本：自动去重 + 快速reindex）
+        获取辐照度分量（继承基类优化）
 
-        优化点：
-        1. 时间去重：只对唯一时间点做reindex
-        2. 使用ffill代替nearest：速度快3-5倍
+        基类已实现时间去重优化，此方法保持接口兼容性
 
         Parameters
         ----------
@@ -140,27 +134,8 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         pandas.DataFrame
             辐照度数据，包含列: ghi, dni, dhi
         """
-        if weather_data is None:
-            # 无数据，返回零值
-            return pd.DataFrame({
-                'ghi': np.zeros(len(times)),
-                'dni': np.zeros(len(times)),
-                'dhi': np.zeros(len(times))
-            }, index=times)
-
-        # 🚀 优化1：时间去重
-        unique_times = times.unique()
-
-        # 🚀 优化2：使用ffill代替nearest（速度快3-5倍）
-        # ffill：向前填充，适用于分钟级数据
-        irrad_components_unique = weather_data[['ghi', 'dni', 'dhi']].reindex(
-            unique_times, method='ffill'
-        ).fillna(0)
-
-        # reindex 回原始时间序列
-        irrad_components = irrad_components_unique.reindex(times)
-
-        return irrad_components
+        # 直接调用基类实现（已包含去重优化）
+        return super().get_irradiance_components(times, weather_data)
 
     def sun_position_to_vector(self, solar_position):
         """
@@ -749,90 +724,6 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         print(f"   ✅ 计算完成")
         return result_df
 
-    def resample_trajectory(self, trajectory_df):
-        """
-        重采样单个轨迹到固定时间间隔
-
-        Parameters
-        ----------
-        trajectory_df : pandas.DataFrame
-            单个车辆的轨迹数据，必须包含: 'datetime', 'lng', 'lat', 'angle'
-
-        Returns
-        -------
-        pandas.DataFrame
-            重采样后的轨迹数据（包含插值后的位置、角度、速度）
-            索引为 DatetimeIndex（datetime列已设置为索引）
-        """
-        # 数据预处理
-        traj = trajectory_df.copy()
-        traj['datetime'] = pd.to_datetime(traj['datetime'])
-
-        # ✅ 确保时区（避免后续气象数据对齐时时区不匹配）
-        if traj['datetime'].dt.tz is None:
-            traj['datetime'] = traj['datetime'].dt.tz_localize('Asia/Shanghai')
-
-        traj = traj.sort_values('datetime').reset_index(drop=True)
-
-        # 生成完整时间序列
-        start_time = traj['datetime'].min().floor(f'{self.time_resolution_minutes}min')
-        end_time = traj['datetime'].max().ceil(f'{self.time_resolution_minutes}min')
-
-        # ✅ 从 start_time/end_time 继承时区（它们已经从上面的 tz_localize 获得时区）
-        # 不显式指定 tz 参数，避免与已有时区冲突（"Inferred time zone not equal to passed time zone"）
-        full_times = pd.date_range(
-            start_time, end_time,
-            freq=f'{self.time_resolution_minutes}min'
-        )
-
-        # 重采样轨迹（使用线性插值）
-        traj.set_index('datetime', inplace=True)
-        resampled = traj.resample(f'{self.time_resolution_minutes}min').first()
-        resampled = resampled.reindex(full_times)
-
-        # 对位置进行线性插值
-        resampled['lng'] = resampled['lng'].interpolate(method='linear', limit_direction='both')
-        resampled['lat'] = resampled['lat'].interpolate(method='linear', limit_direction='both')
-
-        # 根据插值后的位置重新计算角度（沿着轨迹方向）
-        lng_diff = resampled['lng'].diff().fillna(0)
-        lat_diff = resampled['lat'].diff().fillna(0)
-        # 使用arctan2计算方位角（从北顺时针），转换为0-360度
-        resampled['angle'] = np.degrees(np.arctan2(lng_diff, lat_diff)) % 360
-        # 对于第一个点或相邻点位置相同的情况，用前向填充
-        resampled['angle'] = resampled['angle'].replace(0, np.nan).fillna(method='ffill').fillna(method='bfill')
-
-        # 根据插值后的位置重新计算速度（两点间距离/时间间隔）
-        # 使用haversine公式计算相邻点之间的实际距离（单位：米）
-        lat1 = np.radians(resampled['lat'].shift(1))
-        lat2 = np.radians(resampled['lat'])
-        lng1 = np.radians(resampled['lng'].shift(1))
-        lng2 = np.radians(resampled['lng'])
-
-        dlat = lat2 - lat1
-        dlng = lng2 - lng1
-
-        # Haversine公式
-        a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlng/2)**2
-        c = 2 * np.arcsin(np.sqrt(a))
-        earth_radius_m = 6371000  # 地球半径（米）
-        distance_m = earth_radius_m * c
-
-        # 计算速度（米/秒转换为公里/小时）
-        time_interval_hours = self.time_resolution_minutes / 60.0
-        resampled['speed'] = (distance_m / 1000) / time_interval_hours  # km/h
-        # 第一个点的速度用第二个点的速度填充
-        resampled['speed'] = resampled['speed'].fillna(method='bfill').fillna(0)
-
-        resampled = resampled.dropna(subset=['lng', 'lat', 'angle'])
-
-        # 保持 datetime 作为索引，不再 reset_index
-        # 这样返回的 DataFrame 索引是 DatetimeIndex，可以直接用于气象数据对齐
-        # ✅ 确保索引名称为 'datetime'（reindex 操作可能会丢失索引名称）
-        resampled.index.name = 'datetime'
-
-        return resampled
-
     def process_trajectory(self, trajectory_df, weather_data=None, skip_resample=False):
         """
         处理完整的轨迹数据（重写以使用GPU加速）
@@ -906,15 +797,16 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         print(f"   轨迹点在Mesh范围内: {in_bounds.sum():,}/{len(x):,} ({in_bounds.sum()/len(x)*100:.1f}%)", flush=True)
 
         # 🔧 确保 datetime 是索引（用于正确匹配气象数据和太阳位置计算）
-        # 修复：resample_trajectory 返回时 datetime 在列中，索引是 RangeIndex
-        # 这会导致 get_sun_position_pvlib 和 weather_data.reindex 失败或使用错误的时间对齐
         print(f"\n📅 处理时间索引...", flush=True)
-        if 'datetime' in resampled.columns:
-            print(f"   设置datetime为索引...", flush=True)
-            resampled.set_index('datetime', inplace=True)
-            print(f"   ✅ 索引设置完成", flush=True)
-        elif resampled.index.name != 'datetime':
-            raise ValueError("无法找到datetime列或索引，数据格式错误")
+        if resampled.index.name != 'datetime':
+            if 'datetime' in resampled.columns:
+                print(f"   设置datetime为索引...", flush=True)
+                resampled.set_index('datetime', inplace=True)
+                print(f"   ✅ 索引设置完成", flush=True)
+            else:
+                raise ValueError("无法找到datetime列或索引，数据格式错误")
+        else:
+            print(f"   ✅ datetime已是索引，跳过设置", flush=True)
 
         # GPU加速计算发电功率
         print(f"\n⚡ 准备调用GPU计算...", flush=True)
