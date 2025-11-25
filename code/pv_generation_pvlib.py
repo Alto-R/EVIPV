@@ -218,16 +218,26 @@ class SolarPVCalculator:
                 'dhi': np.zeros(len(times))
             }, index=times)
 
-        # 🚀 优化：时间去重
+        # 🚀 性能优化：时间去重（如果有重复时间戳，减少reindex次数）
         unique_times = times.unique()
 
-        # 使用nearest方法对齐唯一时间点
-        irrad_components_unique = weather_data[['ghi', 'dni', 'dhi']].reindex(
-            unique_times, method='nearest'
-        ).fillna(0)
+        if len(unique_times) < len(times):
+            # 有重复时间戳，使用去重优化
+            # 步骤1: 只对唯一时间点查询天气数据
+            irrad_components_unique = weather_data[['ghi', 'dni', 'dhi']].reindex(
+                unique_times, method='nearest'
+            ).fillna(0)
 
-        # reindex 回原始时间序列
-        irrad_components = irrad_components_unique.reindex(times)
+            # 步骤2: ✅ 修复：使用method='ffill'将结果扩展回原始时间序列
+            # 这样插值点也能获得最近的天气数据值
+            irrad_components = irrad_components_unique.reindex(
+                times, method='ffill'
+            ).fillna(method='bfill').fillna(0)
+        else:
+            # 没有重复，直接查询所有时间点
+            irrad_components = weather_data[['ghi', 'dni', 'dhi']].reindex(
+                times, method='nearest'
+            ).fillna(0)
 
         return irrad_components
 

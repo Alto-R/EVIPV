@@ -845,7 +845,15 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
         # 计算能量
         print(f"   计算发电能量...", flush=True)
-        merged['time_delta_hours'] = self.time_resolution_minutes / 60.0
+
+        # ✅ 支持不规则时间间隔（如果有delta_t_seconds列）
+        if 'delta_t_seconds' in merged.columns:
+            print(f"   使用实际时间间隔（delta_t_seconds）", flush=True)
+            merged['time_delta_hours'] = merged['delta_t_seconds'] / 3600.0
+        else:
+            print(f"   使用固定时间间隔（{self.time_resolution_minutes}分钟）", flush=True)
+            merged['time_delta_hours'] = self.time_resolution_minutes / 60.0
+
         merged['energy_kwh'] = merged['ac_power'] / 1000 * merged['time_delta_hours']
 
         # 确保索引有名字，然后重置索引
