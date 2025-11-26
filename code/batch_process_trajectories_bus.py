@@ -24,6 +24,7 @@
 - 数据准备使用原始GPS点（不重采样，保留真实时间间隔）
 - 停车期间插值：GPS间隔>2分钟时插入计算点，准确计算停车发电量
 - delta_t计算修正：使用"到下一个点的时间"而非"从上一个点的时间"
+- 两级时间克隆：单日→整月（3月1日→3月1-31日）→全年（3月→1-12月）
 - 内存占用：~2GB → ~400MB (80% ⬇️)
 - 启动时间：~50s → ~10s (80% ⬇️)
 """
@@ -66,6 +67,89 @@ def detect_source_month(df, datetime_column='datetime'):
     month_counts = df[datetime_column].dt.month.value_counts()
     source_month = month_counts.idxmax()
     return int(source_month)
+
+
+def clone_trajectory_to_day(df, target_day, datetime_column='datetime'):
+    """
+    将轨迹克隆到目标日期
+
+    示例：3月1日的轨迹 → 3月2日的轨迹
+    """
+    original_dt = df[datetime_column]
+    original_tz = original_dt.dt.tz
+
+    try:
+        new_dates = pd.to_datetime({
+            'year': original_dt.dt.year,
+            'month': original_dt.dt.month,
+            'day': target_day,
+            'hour': original_dt.dt.hour,
+            'minute': original_dt.dt.minute,
+            'second': original_dt.dt.second,
+        }, errors='coerce')
+    except Exception:
+        def replace_day(dt):
+            try:
+                return dt.replace(day=target_day)
+            except ValueError:
+                return pd.NaT
+        new_dates = original_dt.apply(replace_day)
+
+    if original_tz is not None:
+        new_dates = new_dates.dt.tz_localize(original_tz)
+
+    valid_mask = new_dates.notna()
+    df_cloned = df[valid_mask].copy()
+    df_cloned[datetime_column] = new_dates[valid_mask]
+
+    return df_cloned, (~valid_mask).sum()
+
+
+def clone_trajectory_to_all_days(df, datetime_column='datetime'):
+    """
+    将单日轨迹克隆到该月所有天
+
+    背景：公交车数据只有某一天（如3月1日），需要扩展到整月
+
+    示例：3月1日 → 3月1-31日（31天完整数据）
+    """
+    # 检测源日期
+    source_day = df[datetime_column].dt.day.mode()[0]  # 最常见的日期
+    source_month = df[datetime_column].dt.month.mode()[0]
+    source_year = df[datetime_column].dt.year.mode()[0]
+
+    # 过滤出源日期的数据
+    source_date_mask = (
+        (df[datetime_column].dt.day == source_day) &
+        (df[datetime_column].dt.month == source_month) &
+        (df[datetime_column].dt.year == source_year)
+    )
+    source_df = df[source_date_mask].copy()
+
+    if len(source_df) == 0:
+        return df
+
+    # 计算该月天数
+    from calendar import monthrange
+    _, days_in_month = monthrange(source_year, source_month)
+
+    # 克隆到该月所有天
+    all_daily_trajs = []
+    for target_day in range(1, days_in_month + 1):
+        if target_day == source_day:
+            daily_traj = source_df.copy()
+        else:
+            daily_traj, _ = clone_trajectory_to_day(source_df, target_day)
+
+        if len(daily_traj) > 0:
+            all_daily_trajs.append(daily_traj)
+
+    if not all_daily_trajs:
+        return df
+
+    # 合并所有天
+    full_month_traj = pd.concat(all_daily_trajs, ignore_index=True)
+    return full_month_traj
 
 
 def clone_trajectory_to_month(df, target_month, datetime_column='datetime'):
@@ -314,6 +398,18 @@ def prepare_worker(task_queue, data_queue, config, mesh_path, worker_id):
                 # 处理最后一个点：使用前面点的中位数间隔（稳健估计）
                 median_interval = trajectory_df['delta_t_seconds'].median()
                 trajectory_df.loc[len(trajectory_df)-1, 'delta_t_seconds'] = median_interval
+
+                # ✅ 检测并处理单日数据（公交车专用）
+                # 背景：公交车数据可能只有某一天（如3月1日），需先扩展到整月
+                clone_to_all_days = config['computation'].get('clone_to_all_days', True)
+                unique_dates = trajectory_df['datetime'].dt.date.nunique()
+
+                if clone_to_all_days and unique_dates == 1:
+                    print(f"[准备Worker-{worker_id}]    {vehicle_id}: 检测到单日数据，克隆到整月...", flush=True)
+                    original_count = len(trajectory_df)
+                    trajectory_df = clone_trajectory_to_all_days(trajectory_df)
+                    cloned_count = len(trajectory_df)
+                    print(f"[准备Worker-{worker_id}]    {vehicle_id}: 单日→整月 {original_count:,} → {cloned_count:,} records", flush=True)
 
                 # 克隆到12个月
                 clone_to_all_months = config['computation'].get('clone_to_all_months', True)
@@ -631,6 +727,7 @@ CONFIG = {
         'gpu_id': 1,
         'mesh_grid_size': None,
         'clone_to_all_months': True,  # ✅ 克隆到12个月以计算全年发电量
+        'clone_to_all_days': True,    # ✅ 克隆单日数据到整月（公交车专用：3月1日→3月1-31日）
         'max_vehicles': None,
         'vehicle_range': None,
 
