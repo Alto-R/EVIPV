@@ -4,12 +4,12 @@
 架构设计：
 ┌─────────────────────────────────────────────────────────────┐
 │  主进程 (Coordinator)                                        │
-│                                                              │
-│  ┌──────────────────┐    ┌──────────────┐    ┌───────────┐ │
-│  │ 数据准备进程池    │───>│ GPU计算进程  │───>│保存进程池  │ │
-│  │ (4个CPU workers) │    │ (单GPU批量)  │    │(2个workers)│ │
-│  └──────────────────┘    └──────────────┘    └───────────┘ │
-│         生产者               消费者/生产者         消费者     │
+│                                                             │
+│  ┌──────────────────┐    ┌──────────────┐    ┌───────────┐  │
+│  │ 数据准备进程池     │───>│ GPU计算进程   │───>│保存进程池    │  │
+│  │ (n个CPU workers) │    │ (单GPU批量)   │    │(n个workers)│  │
+│  └──────────────────┘    └──────────────┘    └───────────┘  │
+│         生产者               消费者/生产者         消费者       │
 └─────────────────────────────────────────────────────────────┘
 
 优势：
@@ -341,6 +341,10 @@ def prepare_worker(task_queue, data_queue, config, mesh_path, worker_id):
 
                 # 合并全年数据
                 full_year_traj = pd.concat(all_monthly_trajs, ignore_index=True)
+
+                # ✅ FIX: 排序保证时间单调递增（pandas reindex with ffill/bfill需要单调索引）
+                full_year_traj = full_year_traj.sort_values('datetime').reset_index(drop=True)
+
                 full_year_traj['vehicle_id'] = vehicle_id
 
                 # 计算日期范围（用于获取气象数据）
@@ -473,6 +477,11 @@ def process_batch(batch_data, calculator, weather_cache, result_queue, config):
 
         # 合并批次中所有车辆的轨迹
         merged_traj = pd.concat([d['trajectory'] for d in batch_data], ignore_index=True)
+
+        # ✅ FIX: 排序保证datetime单调递增（reindex要求）
+        # 说明：合并多车后时间会倒退（车A的12月 → 车B的1月）
+        # 排序后：车辆数据会交错但各自时间顺序不变，最后用vehicle_id分组还原
+        merged_traj = merged_traj.sort_values('datetime').reset_index(drop=True)
 
         # 推断日期范围（取所有车辆的最小/最大）
         all_start_dates = [pd.to_datetime(d['start_date']) for d in batch_data]
@@ -626,7 +635,7 @@ CONFIG = {
         'use_gpu': True,
         'gpu_id': 1,
         'mesh_grid_size': None,
-        'clone_to_all_months': True,
+        'clone_to_all_months': True,  # ✅ 克隆到12个月以计算全年发电量
         'max_vehicles': 1050,
         'vehicle_range': None,
 
