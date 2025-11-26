@@ -18,19 +18,6 @@
 3. 并行保存结果（I/O不阻塞）
 4. 流水线处理，减少等待时间
 5. ⚡ 优化：准备进程不加载mesh（节省80%内存和启动时间）
-
-性能优化细节：
-- building_mesh 仅在GPU进程加载1次（原来加载5次）
-- 数据准备使用原始GPS点（不重采样，保留真实时间间隔）
-- 停车期间插值：GPS间隔>2分钟时插入计算点，准确计算停车发电量
-- delta_t计算修正：使用"到下一个点的时间"而非"从上一个点的时间"
-- 内存占用：~2GB → ~400MB (80% ⬇️)
-- 启动时间：~50s → ~10s (80% ⬇️)
-
-使用示例：
-    python batch_process_trajectories_producer_consumer.py
-    python batch_process_trajectories_producer_consumer.py --gpu 1 --vehicle-range 1:100
-    python batch_process_trajectories_producer_consumer.py --prepare-workers 6 --gpu-batch-size 80
 """
 
 import os
