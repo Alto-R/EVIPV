@@ -252,12 +252,12 @@ class SolarPVCalculator:
         lat : float or np.ndarray
             纬度
         height : float or np.ndarray
-            高度（米）
+            高度（米）- 重要：这是相对于WGS84椭球面的高度
 
         Returns
         -------
-        x, y : np.ndarray
-            模型坐标系下的x, y坐标（z由height参数指定）
+        x, y, z : np.ndarray
+            模型坐标系下的x, y, z坐标（ECEF坐标系，正确处理了高度）
         """
         # 确保 height 的形状和 lon/lat 一致
         lon_array = np.atleast_1d(lon)
@@ -268,7 +268,7 @@ class SolarPVCalculator:
         if height_array.size == 1 and lon_array.size > 1:
             height_array = np.full_like(lon_array, height_array[0], dtype=float)
 
-        # 使用RealSceneDL转换
+        # 使用RealSceneDL转换（包含高度信息，正确转换到ECEF）
         coords_3dtiles = convert_wgs84_to_3dtiles(lon_array, lat_array, height_array)
 
         # coords_3dtiles shape: (N, 3) 或 (3,)
@@ -276,12 +276,14 @@ class SolarPVCalculator:
             # 单个点
             x = np.array([coords_3dtiles[0]])
             y = np.array([coords_3dtiles[1]])
+            z = np.array([coords_3dtiles[2]])
         else:
             # 多个点
             x = coords_3dtiles[:, 0]
             y = coords_3dtiles[:, 1]
+            z = coords_3dtiles[:, 2]
 
-        return x, y
+        return x, y, z
 
     def resample_trajectory(self, trajectory_df):
         """

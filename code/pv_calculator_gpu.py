@@ -250,7 +250,7 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
         return direction_ecef
 
-    def calculate_shadows_batch_gpu(self, points_xy, height, times, solar_position=None, sun_vectors=None):
+    def calculate_shadows_batch_gpu(self, points_xyz, times, solar_position=None, sun_vectors=None):
         """
         GPU加速的批量阴影计算
 
@@ -264,10 +264,8 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
         Parameters
         ----------
-        points_xy : numpy.ndarray
-            点的xy坐标 (N, 2)
-        height : float
-            点的高度(车顶高度，约1.5米)
+        points_xyz : numpy.ndarray
+            点的xyz坐标 (N, 3)，已包含正确的车辆高度（ECEF坐标系）
         times : pandas.DatetimeIndex
             时间序列
         solar_position : pandas.DataFrame, optional
@@ -281,7 +279,7 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         numpy.ndarray
             阴影数组 (N,)，每个点对应时间的阴影状态
         """
-        n_points = len(points_xy)
+        n_points = len(points_xyz)
         n_times = len(times)
 
         # 数据一致性检查
@@ -326,19 +324,12 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
 
         print(f"   白天时间点数: {len(daytime_indices):,}", flush=True)
 
-        # 获取mesh的Z基准（地面高度）
-        mesh_z_min = self.building_trimesh.bounds[0][2]
-        vehicle_z = mesh_z_min + height  # 相对于mesh地面的车顶高度
-        print(f"   车辆Z坐标: {vehicle_z:.1f}m (mesh地面{mesh_z_min:.1f}m + 车高{height}m)", flush=True)
-
-        # 构建查询点
-        print(f"   构建查询点数组...", flush=True)
-        query_points = np.column_stack([
-            points_xy[:, 0],
-            points_xy[:, 1],
-            np.full(n_points, vehicle_z)
-        ])
-        print(f"   ✅ 查询点构建完成", flush=True)
+        # 使用预计算的3D坐标（已包含正确的车辆高度）
+        query_points = points_xyz
+        print(f"   ✅ 使用预计算的3D坐标（含正确车辆高度）", flush=True)
+        mesh_bounds = self.building_trimesh.bounds
+        print(f"   车辆Z范围: [{query_points[:, 2].min():.1f}, {query_points[:, 2].max():.1f}]m", flush=True)
+        print(f"   Mesh Z范围: [{mesh_bounds[0][2]:.1f}, {mesh_bounds[1][2]:.1f}]m", flush=True)
 
         # 🔥 GPU加速部分: 轨迹优化光线生成
         if self.device.type == 'cuda' and TORCH_AVAILABLE:
@@ -580,8 +571,8 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
             'poa_reflected': poa_reflected
         }
 
-    def calculate_pv_power_gpu(self, times, points_xy, vehicle_azimuths,
-                               weather_data=None, tilt=5, height=1.5):
+    def calculate_pv_power_gpu(self, times, points_xyz, vehicle_azimuths,
+                               weather_data=None, tilt=5):
         """
         GPU加速的光伏功率计算（轨迹优化）
 
@@ -592,23 +583,21 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         ----------
         times : pandas.DatetimeIndex
             时间序列
-        points_xy : numpy.ndarray
-            车辆位置坐标 (N, 2)
+        points_xyz : numpy.ndarray
+            车辆位置3D坐标 (N, 3)，已包含正确的车辆高度（ECEF坐标系）
         vehicle_azimuths : numpy.ndarray
             车辆朝向角度(度) (N,)
         weather_data : pandas.DataFrame, optional
             天气数据
         tilt : float
             光伏板倾角(度)
-        height : float
-            车顶高度(米)
 
         Returns
         -------
         pandas.DataFrame
             发电功率和相关参数（N条记录）
         """
-        n_points = len(points_xy)
+        n_points = len(points_xyz)
         n_times = len(times)
 
         if n_points != n_times:
@@ -632,7 +621,7 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         # GPU加速阴影计算
         print(f"\n🌓 开始GPU阴影计算...", flush=True)
         shadow_result = self.calculate_shadows_batch_gpu(
-            points_xy, height, times,
+            points_xyz, times,
             solar_position=solar_position  # ✅ 传递预计算结果，避免重复计算
         )
         print(f"   ✅ 阴影计算完成", flush=True)
@@ -724,7 +713,7 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         print(f"   ✅ 计算完成")
         return result_df
 
-    def process_trajectory(self, trajectory_df, weather_data=None, skip_resample=False):
+    def process_trajectory(self, trajectory_df, weather_data=None, skip_resample=False, vehicle_height=1.5):
         """
         处理完整的轨迹数据（重写以使用GPU加速）
 
@@ -737,6 +726,8 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
             天气数据
         skip_resample : bool, optional
             如果为True，跳过重采样步骤（假设输入已经重采样）
+        vehicle_height : float, optional
+            车辆高度（米），默认1.5m（小汽车），公交车应设为3.0m
 
         Returns
         -------
@@ -748,6 +739,7 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         print("="*60, flush=True)
         print(f"轨迹点数: {len(trajectory_df):,}", flush=True)
         print(f"skip_resample: {skip_resample}", flush=True)
+        print(f"车辆高度: {vehicle_height}m", flush=True)
 
         # 重采样（如果需要）
         if skip_resample:
@@ -774,17 +766,21 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
             print("⚠️  警告: 没有有效数据", flush=True)
             return pd.DataFrame()
 
-        # 转换坐标
-        print(f"\n🗺️  转换坐标系统...", flush=True)
-        x, y = self.gps_to_model_coords(resampled['lng'].values, resampled['lat'].values)
-        points_xy = np.column_stack([x, y])
+        # 转换坐标（包含车辆高度）
+        print(f"\n🗺️  转换坐标系统（含车辆高度 {vehicle_height}m）...", flush=True)
+        x, y, z = self.gps_to_model_coords(
+            resampled['lng'].values,
+            resampled['lat'].values,
+            height=vehicle_height  # ✅ 传入车辆高度，正确转换到ECEF
+        )
+        points_xyz = np.column_stack([x, y, z])
         vehicle_azimuths = resampled['angle'].values
-        print(f"   ✅ 坐标转换完成", flush=True)
+        print(f"   ✅ 坐标转换完成（含正确高度偏移）", flush=True)
 
         # 诊断输出：检查坐标范围和mesh边界
         print(f"\n🔍 坐标系诊断:", flush=True)
         print(f"   轨迹GPS范围: lng=[{resampled['lng'].min():.6f}, {resampled['lng'].max():.6f}], lat=[{resampled['lat'].min():.6f}, {resampled['lat'].max():.6f}]", flush=True)
-        print(f"   转换后坐标范围: X=[{x.min():.1f}, {x.max():.1f}]m, Y=[{y.min():.1f}, {y.max():.1f}]m", flush=True)
+        print(f"   转换后坐标范围: X=[{x.min():.1f}, {x.max():.1f}]m, Y=[{y.min():.1f}, {y.max():.1f}]m, Z=[{z.min():.1f}, {z.max():.1f}]m", flush=True)
         mesh_bounds = self.building_trimesh.bounds
         print(f"   Mesh边界: X=[{mesh_bounds[0][0]:.1f}, {mesh_bounds[1][0]:.1f}]m, Y=[{mesh_bounds[0][1]:.1f}, {mesh_bounds[1][1]:.1f}]m, Z=[{mesh_bounds[0][2]:.1f}, {mesh_bounds[1][2]:.1f}]m", flush=True)
         print(f"   Mesh统计: 顶点={len(self.building_trimesh.vertices):,}, 面={len(self.building_trimesh.faces):,}", flush=True)
@@ -812,7 +808,7 @@ class GPUAcceleratedSolarPVCalculator(SolarPVCalculator):
         print(f"\n⚡ 准备调用GPU计算...", flush=True)
         power_results = self.calculate_pv_power_gpu(
             times=resampled.index,
-            points_xy=points_xy,
+            points_xyz=points_xyz,  # ✅ 使用包含正确高度的3D坐标
             vehicle_azimuths=vehicle_azimuths,
             weather_data=weather_data
         )

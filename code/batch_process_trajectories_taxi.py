@@ -496,7 +496,8 @@ def process_batch(batch_data, calculator, weather_cache, result_queue, config):
         batch_result = calculator.process_trajectory(
             merged_traj,
             weather_data=weather_data,
-            skip_resample=True  # 已在准备阶段重采样
+            skip_resample=True,  # 已在准备阶段重采样
+            vehicle_height=config['pv_system']['vehicle_height']  # ✅ 传入车辆高度
         )
 
         calc_time = time.time() - calc_start

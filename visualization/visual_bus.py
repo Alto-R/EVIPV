@@ -244,7 +244,7 @@ def plot_annual_generation(annual_df, save_path=None):
     plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
     # 设置x轴范围（手动指定）
-    ax.set_xlim(pd.Timestamp('2018-12-01'), pd.Timestamp('2020-01-31'))
+    ax.set_xlim(pd.Timestamp('2018-12-01'), pd.Timestamp('2020-03-01'))
 
     # 设置y轴从0开始
     ax.set_ylim(bottom=0)
@@ -308,7 +308,7 @@ def plot_cumulative_generation(annual_df, save_path=None):
     plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
     # 设置x轴范围（手动指定）
-    ax.set_xlim(pd.Timestamp('2018-12-01'), pd.Timestamp('2020-02-01'))
+    ax.set_xlim(pd.Timestamp('2018-12-01'), pd.Timestamp('2020-03-01'))
 
     # 设置y轴从0开始
     ax.set_ylim(bottom=0)
@@ -336,7 +336,7 @@ def plot_cumulative_generation(annual_df, save_path=None):
 if __name__ == '__main__':
     # 配置参数
     OUTPUT_DIR = '../output_bus'
-    TARGET_DATE = '2019-07-15'  # 可修改日期
+    TARGET_DATE = '2019-08-15'  # 可修改日期
     MAX_FILES = None  # 限制处理的文件数量（设置为None则处理全部）
 
     # 获取所有PV文件

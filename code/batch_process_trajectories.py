@@ -692,7 +692,8 @@ def main():
         batch_result_df = calculator.process_trajectory(
             merged_batch_traj,
             weather_data=weather_data,
-            skip_resample=True  # ⚡ 已在外层重采样：先对原始数据重采样，再克隆到12个月
+            skip_resample=True,  # ⚡ 已在外层重采样：先对原始数据重采样，再克隆到12个月
+            vehicle_height=config['pv_system']['vehicle_height']  # ✅ 传入车辆高度
         )
         print(f"   ✅ process_trajectory 返回成功", flush=True)
 

@@ -60,89 +60,6 @@ def detect_source_month(df, datetime_column='datetime'):
     return int(source_month)
 
 
-def clone_trajectory_to_day(df, target_day, datetime_column='datetime'):
-    """
-    将轨迹克隆到目标日期
-
-    示例：3月1日的轨迹 → 3月2日的轨迹
-    """
-    original_dt = df[datetime_column]
-    original_tz = original_dt.dt.tz
-
-    try:
-        new_dates = pd.to_datetime({
-            'year': original_dt.dt.year,
-            'month': original_dt.dt.month,
-            'day': target_day,
-            'hour': original_dt.dt.hour,
-            'minute': original_dt.dt.minute,
-            'second': original_dt.dt.second,
-        }, errors='coerce')
-    except Exception:
-        def replace_day(dt):
-            try:
-                return dt.replace(day=target_day)
-            except ValueError:
-                return pd.NaT
-        new_dates = original_dt.apply(replace_day)
-
-    if original_tz is not None:
-        new_dates = new_dates.dt.tz_localize(original_tz)
-
-    valid_mask = new_dates.notna()
-    df_cloned = df[valid_mask].copy()
-    df_cloned[datetime_column] = new_dates[valid_mask]
-
-    return df_cloned, (~valid_mask).sum()
-
-
-def clone_trajectory_to_all_days(df, datetime_column='datetime'):
-    """
-    将单日轨迹克隆到该月所有天
-
-    背景：公交车数据只有某一天（如3月1日），需要扩展到整月
-
-    示例：3月1日 → 3月1-31日（31天完整数据）
-    """
-    # 检测源日期
-    source_day = df[datetime_column].dt.day.mode()[0]  # 最常见的日期
-    source_month = df[datetime_column].dt.month.mode()[0]
-    source_year = df[datetime_column].dt.year.mode()[0]
-
-    # 过滤出源日期的数据
-    source_date_mask = (
-        (df[datetime_column].dt.day == source_day) &
-        (df[datetime_column].dt.month == source_month) &
-        (df[datetime_column].dt.year == source_year)
-    )
-    source_df = df[source_date_mask].copy()
-
-    if len(source_df) == 0:
-        return df
-
-    # 计算该月天数
-    from calendar import monthrange
-    _, days_in_month = monthrange(source_year, source_month)
-
-    # 克隆到该月所有天
-    all_daily_trajs = []
-    for target_day in range(1, days_in_month + 1):
-        if target_day == source_day:
-            daily_traj = source_df.copy()
-        else:
-            daily_traj, _ = clone_trajectory_to_day(source_df, target_day)
-
-        if len(daily_traj) > 0:
-            all_daily_trajs.append(daily_traj)
-
-    if not all_daily_trajs:
-        return df
-
-    # 合并所有天
-    full_month_traj = pd.concat(all_daily_trajs, ignore_index=True)
-    return full_month_traj
-
-
 def clone_trajectory_to_month(df, target_month, datetime_column='datetime'):
     """将轨迹时间戳克隆到目标月份"""
     original_dt = df[datetime_column]
@@ -390,18 +307,6 @@ def prepare_worker(task_queue, data_queue, config, mesh_path, worker_id):
                 median_interval = trajectory_df['delta_t_seconds'].median()
                 trajectory_df.loc[len(trajectory_df)-1, 'delta_t_seconds'] = median_interval
 
-                # ✅ 检测并处理单日数据（公交车专用）
-                # 背景：公交车数据可能只有某一天（如3月1日），需先扩展到整月
-                clone_to_all_days = config['computation'].get('clone_to_all_days', True)
-                unique_dates = trajectory_df['datetime'].dt.date.nunique()
-
-                if clone_to_all_days and unique_dates == 1:
-                    print(f"[准备Worker-{worker_id}]    {vehicle_id}: 检测到单日数据，克隆到整月...", flush=True)
-                    original_count = len(trajectory_df)
-                    trajectory_df = clone_trajectory_to_all_days(trajectory_df)
-                    cloned_count = len(trajectory_df)
-                    print(f"[准备Worker-{worker_id}]    {vehicle_id}: 单日→整月 {original_count:,} → {cloned_count:,} records", flush=True)
-
                 # 克隆到12个月
                 clone_to_all_months = config['computation'].get('clone_to_all_months', True)
                 months_to_process = list(range(1, 13)) if clone_to_all_months else [source_month]
@@ -592,7 +497,7 @@ def process_batch(batch_data, calculator, weather_cache, result_queue, config):
             merged_traj,
             weather_data=weather_data,
             skip_resample=True,  # 已在准备阶段重采样
-            vehicle_height=config['pv_system']['vehicle_height']  # ✅ 传入车辆高度（公交车3.0m）
+            vehicle_height=config['pv_system']['vehicle_height']  # ✅ 传入车辆高度
         )
 
         calc_time = time.time() - calc_start
@@ -699,19 +604,19 @@ def save_worker(result_queue, config, stats_dict, worker_id):
 # ============================================================================
 CONFIG = {
     'location': {
-        'name': '深圳市',
-        'lat': 22.543099,
-        'lon': 114.057868,
+        'name': '上海市',
+        'lat': 31.2331,
+        'lon': 121.4831,
     },
     'data_sources': {
-        'footprint_path': 'data/shenzhen_buildings.geojson',
-        'trajectory_dir': '../../../../data2/hcr/evipv/shenzhendata/bus/processed/representative_trajectories',
+        'footprint_path': 'data/shanghai_buildings.geojson',
+        'trajectory_dir': '/data2/hcr/evipv/shanghaidata/evdata/车辆分组/processed',
     },
     'pv_system': {
-        'panel_area': 25,
+        'panel_area': 2.2,
         'panel_efficiency': 0.20,
         'tilt': 0,
-        'vehicle_height': 3.0,
+        'vehicle_height': 1.5,
     },
     'computation': {
         'time_resolution_minutes': 1,
@@ -719,8 +624,7 @@ CONFIG = {
         'gpu_id': 1,
         'mesh_grid_size': None,
         'clone_to_all_months': True,  # ✅ 克隆到12个月以计算全年发电量
-        'clone_to_all_days': True,    # ✅ 克隆单日数据到整月（公交车专用：3月1日→3月1-31日）
-        'max_vehicles': None,
+        'max_vehicles': 1050,
         'vehicle_range': None,
 
         # 停车期间插值参数
@@ -735,8 +639,8 @@ CONFIG = {
         'batch_timeout': 10,         # 批次超时(秒)
     },
     'output': {
-        'mesh_path': 'data/shenzhen_building_mesh.ply',
-        'output_dir': 'output_bus',
+        'mesh_path': 'data/shanghai_building_mesh.ply',
+        'output_dir': '/data2/hcr/evipv/output_ev',
     },
 }
 
@@ -817,7 +721,16 @@ def main():
 
     # 查找轨迹文件
     traj_dir = Path(config['data_sources']['trajectory_dir'])
-    traj_files = sorted(traj_dir.glob('*_processed.csv'))
+    traj_files = list(traj_dir.glob('*_processed.csv'))
+
+    # 按文件大小从大到小排序（优先处理数据量大的车辆）
+    traj_files = sorted(traj_files, key=lambda f: f.stat().st_size, reverse=True)
+    print(f"📊 文件已按大小排序（从大到小）")
+    if len(traj_files) > 0:
+        largest = traj_files[0]
+        smallest = traj_files[-1]
+        print(f"   最大文件: {largest.name} ({largest.stat().st_size / (1024*1024):.2f} MB)")
+        print(f"   最小文件: {smallest.name} ({smallest.stat().st_size / (1024*1024):.2f} MB)")
 
     # 车辆筛选
     if args.vehicle_range:
@@ -831,6 +744,7 @@ def main():
     elif config['computation'].get('max_vehicles'):
         max_v = config['computation']['max_vehicles']
         traj_files = traj_files[:max_v]
+        print(f"\n📌 选取前 {max_v} 个文件（按大小排序）")
 
     print(f"✅ Found {len(traj_files)} vehicles to process")
 
