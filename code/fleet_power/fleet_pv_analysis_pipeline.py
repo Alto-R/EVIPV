@@ -410,26 +410,29 @@ def aggregate_fleet_charging_demand(dfs_list: List[pd.DataFrame],
 
 def plot_daily_pattern(charging_folder: str,
                       pv_folder: str,
-                      time_start: Optional[str] = None,
-                      time_end: Optional[str] = None,
+                      single_date: str,
+                      freq: str = '1h',
                       output_file: str = 'fleet_daily_pattern.png'):
     """
-    Plot 24-hour daily pattern of charging demand (averaged across all days)
+    Plot single day charging demand pattern
 
     Args:
         charging_folder: Path to folder containing original charging CSV files
         pv_folder: Path to folder containing PV-integrated charging CSV files
-        time_start: Start date string (e.g., '2023-01-01') or None for auto
-        time_end: End date string (e.g., '2023-12-31') or None for auto
+        single_date: Single date to visualize (e.g., '2023-01-15')
+        freq: Time resolution for aggregation (e.g., '1min', '15min', '1h')
         output_file: Output image path
     """
     print("\n" + "=" * 70)
-    print("STEP 3: DAILY PATTERN VISUALIZATION (24-HOUR)")
+    print("STEP 4: SINGLE DAY VISUALIZATION")
     print("=" * 70)
+    print(f"Date: {single_date}")
+    print(f"Aggregation frequency: {freq}\n")
 
-    # Parse time range
-    ts_start = pd.to_datetime(time_start) if time_start else None
-    ts_end = pd.to_datetime(time_end) if time_end else None
+    # Parse single date - set to start and end of that day
+    date_obj = pd.to_datetime(single_date)
+    ts_start = date_obj.replace(hour=0, minute=0, second=0)
+    ts_end = date_obj.replace(hour=23, minute=59, second=59)
 
     # Load fleet data
     print("Loading fleet data...")
@@ -439,130 +442,128 @@ def plot_daily_pattern(charging_folder: str,
         print("No vehicle data found!")
         return
 
-    # Aggregate by hour of day (0-23)
-    print("\nAggregating by hour of day...")
+    # Aggregate charging demand for the single day
+    print(f"\nAggregating data for {single_date}...")
 
-    # Collect all charging events with hour of day
-    original_hourly = []
-    pv_hourly = []
+    agg_original = aggregate_fleet_charging_demand(
+        original_dfs,
+        use_net_grid=False,
+        time_start=ts_start,
+        time_end=ts_end,
+        freq=freq
+    )
 
-    for df in original_dfs:
-        events = aggregate_charging_demand(df, use_net_grid=False, time_start=ts_start, time_end=ts_end)
-        if len(events) > 0:
-            events['hour'] = events['timestamp'].dt.hour
-            original_hourly.append(events)
+    agg_pv = aggregate_fleet_charging_demand(
+        pv_dfs,
+        use_net_grid=True,
+        time_start=ts_start,
+        time_end=ts_end,
+        freq=freq
+    )
 
-    for df in pv_dfs:
-        events = aggregate_charging_demand(df, use_net_grid=True, time_start=ts_start, time_end=ts_end)
-        if len(events) > 0:
-            events['hour'] = events['timestamp'].dt.hour
-            pv_hourly.append(events)
-
-    # Combine and aggregate by hour
-    if len(original_hourly) == 0 or len(pv_hourly) == 0:
-        print("No data to plot!")
+    if len(agg_original) == 0 or len(agg_pv) == 0:
+        print("No data to plot for this date!")
         return
 
-    original_combined = pd.concat(original_hourly, ignore_index=True)
-    pv_combined = pd.concat(pv_hourly, ignore_index=True)
-
-    # Group by hour and calculate mean
-    original_by_hour = original_combined.groupby('hour')['energy_kwh'].sum().reindex(range(24), fill_value=0)
-    pv_by_hour = pv_combined.groupby('hour')['energy_kwh'].sum().reindex(range(24), fill_value=0)
-
     # Calculate reduction
-    reduction_by_hour = original_by_hour - pv_by_hour
+    demand_reduction_series = agg_original['total_demand_kwh'] - agg_pv['total_demand_kwh']
 
     # Plot
     print("Creating plot...")
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12), height_ratios=[2, 1])
 
-    hours = range(24)
-
-    # ========== Upper Plot: Daily Pattern Comparison ==========
-    ax1.plot(hours, original_by_hour.values,
+    # ========== Upper Plot: Single Day Pattern Comparison ==========
+    ax1.plot(agg_original['timestamp'], agg_original['total_demand_kwh'],
             color='#1f77b4',
             linewidth=2.5,
             label='Scenario A: Without Rooftop PV',
             alpha=0.8,
             marker='o',
-            markersize=6)
+            markersize=4)
 
-    ax1.plot(hours, pv_by_hour.values,
+    ax1.plot(agg_pv['timestamp'], agg_pv['total_demand_kwh'],
             color='#2ca02c',
             linewidth=2.5,
             label='Scenario C: With Rooftop PV',
             alpha=0.8,
             marker='s',
-            markersize=6)
+            markersize=4)
 
     # Styling for upper plot
-    ax1.set_title('EV Fleet Daily Charging Pattern: Rooftop PV Impact (24-Hour Average)',
+    ax1.set_title(f'EV Fleet Single Day Charging Pattern: {single_date} ({freq} resolution)',
                 fontsize=16,
                 fontweight='bold',
                 pad=20)
-    ax1.set_xlabel('Hour of Day', fontsize=13, fontweight='bold')
-    ax1.set_ylabel('Total Charging Demand (kWh)', fontsize=13, fontweight='bold')
-    ax1.set_xticks(hours)
-    ax1.set_xlim(-0.5, 23.5)
+    ax1.set_xlabel('Date and Time', fontsize=13, fontweight='bold')
+    ax1.set_ylabel(f'Total Charging Demand per {freq} (kWh)', fontsize=13, fontweight='bold')
+
+    # Format x-axis to show date + hour
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    ax1.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+    ax1.tick_params(axis='x', rotation=45)
+
     ax1.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
     ax1.yaxis.grid(True, linestyle='--', alpha=0.4)
     ax1.legend(loc='best', fontsize=12, framealpha=0.95, shadow=True)
 
-    # ========== Lower Plot: Demand Reduction by Hour ==========
-    ax2.fill_between(hours, reduction_by_hour.values, 0,
+    # ========== Lower Plot: Demand Reduction ==========
+    ax2.fill_between(agg_original['timestamp'], demand_reduction_series, 0,
                      color='#ff7f0e',
                      alpha=0.3,
                      label='Grid Demand Reduction')
-    ax2.plot(hours, reduction_by_hour.values,
+    ax2.plot(agg_original['timestamp'], demand_reduction_series,
             color='#ff7f0e',
             linewidth=2.5,
             alpha=0.9,
             marker='D',
-            markersize=5)
+            markersize=3)
 
     # Add a zero reference line
     ax2.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
 
     # Styling for lower plot
-    ax2.set_title('Grid Demand Reduction by Hour',
+    ax2.set_title('Grid Demand Reduction',
                 fontsize=14,
                 fontweight='bold',
                 pad=15)
-    ax2.set_xlabel('Hour of Day', fontsize=13, fontweight='bold')
-    ax2.set_ylabel('Demand Reduction (kWh)', fontsize=13, fontweight='bold')
-    ax2.set_xticks(hours)
-    ax2.set_xlim(-0.5, 23.5)
+    ax2.set_xlabel('Date and Time', fontsize=13, fontweight='bold')
+    ax2.set_ylabel(f'Demand Reduction per {freq} (kWh)', fontsize=13, fontweight='bold')
+
+    # Format x-axis to show date + hour
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    ax2.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+    ax2.tick_params(axis='x', rotation=45)
+
     ax2.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
     ax2.yaxis.grid(True, linestyle='--', alpha=0.4)
     ax2.legend(loc='best', fontsize=12, framealpha=0.95, shadow=True)
 
     # Calculate statistics
     total_pv_energy = sum(df['total_pv_contribution_kwh'].sum() for df in pv_dfs)
-    total_demand_original = original_by_hour.sum()
-    total_demand_pv = pv_by_hour.sum()
+    total_demand_original = agg_original['total_demand_kwh'].sum()
+    total_demand_pv = agg_pv['total_demand_kwh'].sum()
     demand_reduction = total_demand_original - total_demand_pv
     reduction_percentage = (demand_reduction / total_demand_original * 100) if total_demand_original > 0 else 0
 
-    # Peak hours
-    peak_hour_original = original_by_hour.idxmax()
-    peak_hour_pv = pv_by_hour.idxmax()
-    max_reduction_hour = reduction_by_hour.idxmax()
+    # Peak times
+    peak_time_original = agg_original.loc[agg_original['total_demand_kwh'].idxmax(), 'timestamp']
+    max_reduction_time = agg_original.loc[demand_reduction_series.idxmax(), 'timestamp']
 
     # Statistics text box
     stats_text = (
-        f"Daily Pattern Statistics:\n"
+        f"Single Day Statistics ({single_date}):\n"
         f"• Number of vehicles: {len(vehicle_ids)}\n"
         f"• Total PV contribution: {total_pv_energy:.2f} kWh\n"
+        f"• Aggregation frequency: {freq}\n"
         f"\n"
-        f"Hourly Aggregated Demand:\n"
+        f"Demand Comparison:\n"
         f"• Original demand: {total_demand_original:.2f} kWh\n"
         f"• Net grid demand (w/ PV): {total_demand_pv:.2f} kWh\n"
         f"• Demand reduction: {demand_reduction:.2f} kWh ({reduction_percentage:.1f}%)\n"
         f"\n"
-        f"Peak Hours:\n"
-        f"• Original peak: {peak_hour_original:02d}:00\n"
-        f"• Max reduction at: {max_reduction_hour:02d}:00"
+        f"Peak Times:\n"
+        f"• Original peak at: {peak_time_original.strftime('%H:%M')}\n"
+        f"• Max reduction at: {max_reduction_time.strftime('%H:%M')}"
     )
 
     ax1.text(0.02, 0.98, stats_text,
@@ -685,8 +686,8 @@ def plot_fleet_comparison(charging_folder: str,
     ax1.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
     ax1.yaxis.grid(True, linestyle='--', alpha=0.4)
 
-    # Format x-axis for upper plot
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    # Format x-axis for upper plot - show date + hour
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
     ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax1.tick_params(axis='x', rotation=45)
 
@@ -727,8 +728,8 @@ def plot_fleet_comparison(charging_folder: str,
     ax2.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
     ax2.yaxis.grid(True, linestyle='--', alpha=0.4)
 
-    # Format x-axis for lower plot
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    # Format x-axis for lower plot - show date + hour
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
     ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax2.tick_params(axis='x', rotation=45)
 
@@ -834,11 +835,14 @@ def process_fleet_and_plot(
     skip_existing: bool = True,
     time_start: Optional[str] = None,
     time_end: Optional[str] = None,
-    freq: str = '1h',
-    output_plot: str = 'fleet_scenario_comparison.png'
+    single_date: Optional[str] = None,
+    freq_range: str = '1h',
+    freq_single: str = '15min',
+    output_plot: str = 'fleet_scenario_comparison.png',
+    output_daily_plot: str = 'fleet_daily_pattern.png'
 ):
     """
-    Complete pipeline: Process all vehicles and create fleet comparison plot
+    Complete pipeline: Process all vehicles and create fleet comparison plots
 
     Args:
         charging_folder: Path to folder containing charging CSV files
@@ -847,10 +851,13 @@ def process_fleet_and_plot(
         vehicle_info_file: Path to vehicle info CSV file
         charging_efficiency: Charging efficiency (default 0.95)
         skip_existing: Skip processing if output file already exists (default True)
-        time_start: Start date for plot (e.g., '2023-01-01') or None
-        time_end: End date for plot (e.g., '2023-12-31') or None
-        freq: Time resolution for aggregation (e.g., '15min', '1h')
-        output_plot: Output plot filename (will be saved in output_folder)
+        time_start: Start date for range plot (e.g., '2023-01-01') or None
+        time_end: End date for range plot (e.g., '2023-12-31') or None
+        single_date: Single date for daily pattern plot (e.g., '2023-01-15') or None
+        freq_range: Time resolution for range plot aggregation (e.g., '15min', '1h')
+        freq_single: Time resolution for single day plot aggregation (e.g., '1min', '15min')
+        output_plot: Output time-series plot filename
+        output_daily_plot: Output daily pattern plot filename
     """
     print("\n" + "=" * 70)
     print("EV FLEET PV ANALYSIS PIPELINE")
@@ -930,16 +937,30 @@ def process_fleet_and_plot(
         print("\nNo vehicles were processed successfully. Cannot create plot.")
         return
 
-    # Step 3: Create fleet comparison plot
+    # Step 3: Create time-series comparison plot
     output_plot_path = str(output_plot)
     plot_fleet_comparison(
         charging_folder=charging_folder,  # Load original charging files
         pv_folder=str(output_dir),        # Load PV-integrated files from output folder
         time_start=time_start,
         time_end=time_end,
-        freq=freq,
+        freq=freq_range,
         output_file=output_plot_path
     )
+
+    # Step 4: Create daily pattern plot (if single_date is specified)
+    if single_date:
+        output_daily_plot_path = str(output_daily_plot)
+        plot_daily_pattern(
+            charging_folder=charging_folder,  # Load original charging files
+            pv_folder=str(output_dir),        # Load PV-integrated files from output folder
+            single_date=single_date,
+            freq=freq_single,
+            output_file=output_daily_plot_path
+        )
+    else:
+        print("\n  Note: No single_date specified, skipping daily pattern plot")
+        output_daily_plot_path = None
 
     print("\n" + "=" * 70)
     print("PIPELINE COMPLETE!")
@@ -948,7 +969,9 @@ def process_fleet_and_plot(
     print(f"  - Skipped (already processed): {skipped_count}")
     print(f"  - Newly processed: {processed_count - skipped_count}")
     print(f"  - Failed: {failed_count}")
-    print(f"Output plot: {output_plot_path}")
+    print(f"Time-series plot: {output_plot_path}")
+    if output_daily_plot_path:
+        print(f"Daily pattern plot: {output_daily_plot_path}")
     print(f"All files saved in: {output_folder}")
     print("=" * 70)
 
@@ -965,11 +988,18 @@ if __name__ == '__main__':
         'output_folder': '/data2/hcr/evipv/shanghaidata/charge_with_pv',                    # Folder for output files
         'vehicle_info_file': '车型信息.csv',             # Vehicle information file
         'charging_efficiency': 0.95,                    # Charging efficiency
-        'skip_existing': False,                          # Skip already processed vehicles (True/False)
-        'time_start': '2020-11-01',                             # Plot start date (e.g., '2020-10-01')
-        'time_end': '2020-11-07',                               # Plot end date (e.g., '2020-12-31')
-        'freq': '1min',                                 # Aggregation frequency: '1min', '15min', '30min', '1h'
-        'output_plot': 'fleet_scenario_comparison.png'  # Output plot filename
+        'skip_existing': True,                          # Skip already processed vehicles (True/False)
+
+        # Range plot (time-series) settings
+        'time_start': '2020-11-01',                     # Range plot start date (e.g., '2020-11-01')
+        'time_end': '2020-11-07',                       # Range plot end date (e.g., '2020-11-07')
+        'freq_range': '1min',                             # Range plot aggregation frequency: '15min', '30min', '1h'
+        'output_plot': 'fleet_scenario_comparison.png',  # Output time-series plot filename
+
+        # Single day plot settings
+        'single_date': '2020-11-03',                    # Single day to visualize (e.g., '2020-11-03'), or None to skip
+        'freq_single': '1min',                         # Single day plot aggregation frequency: '1min', '5min', '15min'
+        'output_daily_plot': 'fleet_daily_pattern.png'  # Output daily pattern plot filename
     }
 
     # Run complete pipeline
