@@ -14,6 +14,8 @@ Scenarios:
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Tuple, List
@@ -702,6 +704,142 @@ def plot_daily_pattern(charging_folder: str,
     print("=" * 70)
 
 
+def plot_geo_reduction(
+    pv_folder: str,
+    single_date: str,
+    slice_hours: int = 6,
+    output_file: str = 'fleet_geo_reduction.png',
+    min_reduction: float = 0.0,
+    bbox: Optional[Tuple[float, float, float, float]] = None
+):
+    """
+    Static geographic visualization of demand reduction for a given day.
+    Plots point cloud with size/color encoding reduction; subplots by time slices (e.g., every 6 hours).
+
+    Args:
+        pv_folder: Folder containing PV-integrated charging CSV files.
+        single_date: Date string (e.g., '2020-11-03') to visualize.
+        slice_hours: Time slice size in hours (e.g., 6 -> 4 subplots per day).
+        output_file: Output image path.
+        min_reduction: Clip reductions below this (e.g., 0 to ignore negative/zero).
+        bbox: (lon_min, lon_max, lat_min, lat_max); default covers Shanghai.
+    """
+    print("\n" + "=" * 70)
+    print("STEP: GEOGRAPHIC REDUCTION MAP")
+    print("=" * 70)
+    print(f"Date: {single_date}, slice_hours={slice_hours}")
+
+    pv_dir = Path(pv_folder)
+    pv_files = sorted(pv_dir.glob('*_charging_with_pv.csv'))
+    if len(pv_files) == 0:
+        print("No PV-integrated files found; aborting geo plot.")
+        return
+
+    events = []
+    date_obj = pd.to_datetime(single_date)
+    start = date_obj.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + pd.Timedelta(days=1)
+
+    for pv_file in pv_files:
+        df = pd.read_csv(pv_file)
+        if 'etime' not in df.columns or 'net_grid_energy_kwh' not in df.columns:
+            continue
+        df['etime'] = pd.to_datetime(df['etime'])
+        df_day = df[(df['etime'] >= start) & (df['etime'] < end)].copy()
+        if len(df_day) == 0:
+            continue
+
+        if 'original_charge_demand_kwh' in df_day.columns:
+            reduction = df_day['original_charge_demand_kwh'] - df_day['net_grid_energy_kwh']
+        else:
+            reduction = -df_day['net_grid_energy_kwh']
+        if min_reduction is not None:
+            reduction = reduction.clip(lower=min_reduction)
+        df_day['reduction_kwh'] = reduction
+
+        df_day['lon'] = df_day['slon'].where(df_day['slon'].notna(), df_day.get('elon'))
+        df_day['lat'] = df_day['slat'].where(df_day['slat'].notna(), df_day.get('elat'))
+        df_day = df_day[df_day['lon'].notna() & df_day['lat'].notna()]
+        if len(df_day) == 0:
+            continue
+
+        hours = df_day['etime'].dt.hour
+        slice_idx = (hours // slice_hours).astype(int)
+        df_day['slice_label'] = slice_idx.apply(lambda x: f"{int(x*slice_hours):02d}-{int((x+1)*slice_hours):02d}")
+
+        events.append(df_day[['lon', 'lat', 'reduction_kwh', 'slice_label']])
+
+    if len(events) == 0:
+        print("No events for the specified date; geo plot skipped.")
+        return
+
+    all_events = pd.concat(events, ignore_index=True)
+
+    slice_labels = sorted(all_events['slice_label'].unique(), key=lambda s: int(s.split('-')[0]))
+    n_slices = min(4, len(slice_labels))  # 2x2 grid max
+    slice_labels = slice_labels[:n_slices]
+    rows, cols = 2, 2
+
+    vmax = all_events['reduction_kwh'].max()
+    if vmax <= 0:
+        print("No positive reduction values; geo plot skipped.")
+        return
+
+    fig, axes = plt.subplots(
+        rows,
+        cols,
+        figsize=(6 * cols, 6 * rows),
+        squeeze=False,
+        subplot_kw={'projection': ccrs.PlateCarree()}
+    )
+    cmap = plt.cm.YlOrRd
+    sc = None
+
+    # Default bbox for Shanghai if not provided
+    if bbox is None:
+        bbox = (120.85, 122.10, 30.60, 31.80)
+    lon_min, lon_max, lat_min, lat_max = bbox
+
+    for idx, label in enumerate(slice_labels):
+        r = idx // cols
+        c = idx % cols
+        ax = axes[r][c]
+        data = all_events[all_events['slice_label'] == label]
+
+        sizes = 20 + 80 * (data['reduction_kwh'] / vmax)
+        sc = ax.scatter(
+            data['lon'],
+            data['lat'],
+            c=data['reduction_kwh'],
+            s=sizes,
+            cmap=cmap,
+            vmin=0,
+            vmax=vmax,
+            alpha=0.7,
+            edgecolor='k',
+            linewidth=0.2,
+            transform=ccrs.PlateCarree()
+        )
+        ax.set_title(f"{single_date} {label}", fontsize=12, fontweight='bold')
+        ax.coastlines(resolution='10m', alpha=0.3)
+        ax.add_feature(cfeature.BORDERS.with_scale('10m'), linewidth=0.5, alpha=0.5)
+        ax.add_feature(cfeature.LAND.with_scale('10m'), facecolor='#f2efe9', alpha=0.8)
+        ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=ccrs.PlateCarree())
+
+    for j in range(n_slices, rows * cols):
+        r = j // cols
+        c = j % cols
+        axes[r][c].axis('off')
+
+    if sc is not None:
+        fig.colorbar(sc, ax=axes.ravel().tolist(), label='Demand reduction (kWh)')
+
+    plt.tight_layout()
+    print(f"Saving geographic reduction plot to: {output_file}")
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
 def plot_fleet_comparison(charging_folder: str,
                          pv_folder: str,
                          time_start: Optional[str] = None,
@@ -968,9 +1106,14 @@ def process_fleet_and_plot(
     smooth_range: int = 1,
     smooth_single: int = 1,
     smooth_window: int = 3,
+    geo_plot_date: Optional[str] = None,
+    geo_slice_hours: int = 6,
+    geo_min_reduction: float = 0.0,
+    geo_bbox: Optional[Tuple[float, float, float, float]] = None,
     output_plot: str = 'fleet_scenario_comparison.png',
     output_daily_plot: str = 'fleet_daily_pattern.png',
-    output_daily_profiles: str = 'fleet_daily_profiles.png'
+    output_daily_profiles: str = 'fleet_daily_profiles.png',
+    output_geo_plot: str = 'fleet_geo_reduction.png'
 ):
     """
     Complete pipeline: Process all vehicles and create fleet comparison plots
@@ -993,9 +1136,14 @@ def process_fleet_and_plot(
         smooth_range: Rolling window size for smoothing range plot (set 1 to disable)
         smooth_single: Rolling window size for smoothing single day plot (set 1 to disable)
         smooth_window: Rolling window size for smoothing daily profiles (centered)
+        geo_plot_date: Date for geographic reduction plot or None to skip
+        geo_slice_hours: Time slice size (hours) for geo plot subpanels
+        geo_min_reduction: Clip reductions below this threshold for geo plot
+        geo_bbox: (lon_min, lon_max, lat_min, lat_max); default covers Shanghai
         output_plot: Output time-series plot filename
         output_daily_plot: Output daily pattern plot filename
         output_daily_profiles: Output daily profiles plot filename
+        output_geo_plot: Output geographic reduction plot filename
     """
     print("\n" + "=" * 70)
     print("EV FLEET PV ANALYSIS PIPELINE")
@@ -1116,6 +1264,19 @@ def process_fleet_and_plot(
     else:
         print("\n  Note: No daily_profile_start/end specified, skipping daily profiles plot")
 
+    # Step 6: Create geographic reduction plot for a specific day
+    if geo_plot_date:
+        plot_geo_reduction(
+            pv_folder=str(output_dir),
+            single_date=geo_plot_date,
+            slice_hours=geo_slice_hours,
+            output_file=output_geo_plot,
+            min_reduction=geo_min_reduction,
+            bbox=geo_bbox
+        )
+    else:
+        print("\n  Note: No geo_plot_date specified, skipping geographic reduction plot")
+
     print("\n" + "=" * 70)
     print("PIPELINE COMPLETE!")
     print("=" * 70)
@@ -1128,6 +1289,8 @@ def process_fleet_and_plot(
         print(f"Daily pattern plot: {output_daily_plot_path}")
     if daily_profile_start and daily_profile_end:
         print(f"Daily profiles plot: {output_daily_profiles}")
+    if geo_plot_date:
+        print(f"Geographic reduction plot: {output_geo_plot}")
     print(f"All files saved in: {output_folder}")
     print("=" * 70)
 
@@ -1164,7 +1327,14 @@ if __name__ == '__main__':
         'daily_profile_end': '2020-12-31',              # End date for daily profiles plot
         'freq_daily_profiles': '20min',                 # Aggregation frequency for daily profiles
         'smooth_window': 5,                             # Rolling window size for smoothing (set 1 to disable)
-        'output_daily_profiles': 'fleet_daily_profiles.png'  # Output daily profiles plot filename
+        'output_daily_profiles': 'fleet_daily_profiles.png',  # Output daily profiles plot filename
+
+        # Geographic reduction plot
+        'geo_plot_date': '2020-11-03',                  # Date to visualize geographically (or None to skip)
+        'geo_slice_hours': 6,                           # Hours per subplot slice (e.g., 6 -> 4 subplots)
+        'geo_min_reduction': 0.0,                       # Clip reductions below this for plotting
+        'geo_bbox': (120.85, 122.10, 30.60, 31.80),     # Bounding box (lon_min, lon_max, lat_min, lat_max)
+        'output_geo_plot': 'fleet_geo_reduction.png'    # Output geographic plot filename
     }
 
     # Run complete pipeline
