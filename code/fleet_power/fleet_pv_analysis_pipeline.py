@@ -408,10 +408,113 @@ def aggregate_fleet_charging_demand(dfs_list: List[pd.DataFrame],
     return result
 
 
+def plot_range_daily_profiles(
+    charging_folder: str,
+    pv_folder: str,
+    date_start: str,
+    date_end: str,
+    freq: str = '15min',
+    smooth_window: int = 3,
+    output_file: str = 'fleet_daily_profiles.png'
+):
+    """
+    Plot per-day charging profiles between date_start and date_end:
+    - Original demand
+    - With PV (net grid)
+    - Net reduction
+    Lines are optionally smoothed by a rolling window.
+    """
+    print("\n" + "=" * 70)
+    print("STEP: DAILY PROFILES RANGE PLOT")
+    print("=" * 70)
+    print(f"Date range: {date_start} -> {date_end}, freq={freq}, smooth_window={smooth_window}")
+
+    original_dfs, pv_dfs, vehicle_ids = load_fleet_data(charging_folder, pv_folder)
+    if len(original_dfs) == 0:
+        print("No vehicle data found!")
+        return
+
+    date_list = pd.date_range(date_start, date_end, freq='D')
+    if len(date_list) == 0:
+        print("No dates in range.")
+        return
+
+    def agg_single_day(target_date: pd.Timestamp, dfs, use_net_grid: bool):
+        start = target_date.replace(hour=0, minute=0, second=0)
+        end = target_date.replace(hour=23, minute=59, second=59)
+        agg = aggregate_fleet_charging_demand(
+            dfs,
+            use_net_grid=use_net_grid,
+            time_start=start,
+            time_end=end,
+            freq=freq
+        )
+        if len(agg) == 0:
+            return None
+        agg['hour'] = agg['timestamp'].dt.hour + agg['timestamp'].dt.minute / 60.0
+        if smooth_window and smooth_window > 1:
+            agg['total_demand_kwh'] = (
+                agg['total_demand_kwh']
+                .rolling(window=smooth_window, center=True, min_periods=1)
+                .mean()
+            )
+        return agg
+
+    daily_original = []
+    daily_pv = []
+    daily_reduction = []
+
+    for d in date_list:
+        agg_o = agg_single_day(d, original_dfs, use_net_grid=False)
+        agg_p = agg_single_day(d, pv_dfs, use_net_grid=True)
+        if agg_o is None or agg_p is None or len(agg_o) == 0 or len(agg_p) == 0:
+            continue
+        agg_r = agg_o.copy()
+        agg_r['total_demand_kwh'] = agg_o['total_demand_kwh'] - agg_p['total_demand_kwh']
+        if smooth_window and smooth_window > 1:
+            agg_r['total_demand_kwh'] = (
+                agg_r['total_demand_kwh']
+                .rolling(window=smooth_window, center=True, min_periods=1)
+                .mean()
+            )
+        daily_original.append((d, agg_o))
+        daily_pv.append((d, agg_p))
+        daily_reduction.append((d, agg_r))
+
+    if not daily_original:
+        print("No daily data to plot in the given range.")
+        return
+
+    print("Creating daily profiles plot...")
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+
+    def plot_panel(ax, daily_data, title):
+        for date_obj, agg in daily_data:
+            label = date_obj.strftime('%m-%d')
+            ax.plot(agg['hour'], agg['total_demand_kwh'], linewidth=1.5, alpha=0.7, label=label)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xlabel('Time (h)', fontsize=12, fontweight='bold')
+        ax.set_ylabel(f'Demand per {freq} (kWh)', fontsize=12, fontweight='bold')
+        ax.grid(True, linestyle='--', alpha=0.3)
+        ax.set_xlim(0, 24)
+
+    plot_panel(axes[0], daily_original, 'Original Demand')
+    plot_panel(axes[1], daily_pv, 'With PV (Net Grid)')
+    plot_panel(axes[2], daily_reduction, 'Net Reduction')
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper center', ncol=10, fontsize=8, frameon=False)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    print(f"Saving daily profiles plot to: {output_file}")
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.show()
+
 def plot_daily_pattern(charging_folder: str,
                       pv_folder: str,
                       single_date: str,
                       freq: str = '1h',
+                      smooth_window: int = 1,
                       output_file: str = 'fleet_daily_pattern.png'):
     """
     Plot single day charging demand pattern
@@ -421,6 +524,7 @@ def plot_daily_pattern(charging_folder: str,
         pv_folder: Path to folder containing PV-integrated charging CSV files
         single_date: Single date to visualize (e.g., '2023-01-15')
         freq: Time resolution for aggregation (e.g., '1min', '15min', '1h')
+        smooth_window: Rolling window size for smoothing (set 1 to disable)
         output_file: Output image path
     """
     print("\n" + "=" * 70)
@@ -460,6 +564,15 @@ def plot_daily_pattern(charging_folder: str,
         time_end=ts_end,
         freq=freq
     )
+
+    # Optional smoothing
+    if smooth_window and smooth_window > 1:
+        agg_original['total_demand_kwh'] = agg_original['total_demand_kwh'].rolling(
+            window=smooth_window, center=True, min_periods=1
+        ).mean()
+        agg_pv['total_demand_kwh'] = agg_pv['total_demand_kwh'].rolling(
+            window=smooth_window, center=True, min_periods=1
+        ).mean()
 
     if len(agg_original) == 0 or len(agg_pv) == 0:
         print("No data to plot for this date!")
@@ -594,6 +707,7 @@ def plot_fleet_comparison(charging_folder: str,
                          time_start: Optional[str] = None,
                          time_end: Optional[str] = None,
                          freq: str = '1h',
+                         smooth_window: int = 1,
                          output_file: str = 'fleet_scenario_comparison.png'):
     """
     Plot fleet-level comparison between scenarios
@@ -604,6 +718,7 @@ def plot_fleet_comparison(charging_folder: str,
         time_start: Start date string (e.g., '2023-01-01') or None for auto
         time_end: End date string (e.g., '2023-12-31') or None for auto
         freq: Time resolution for aggregation (e.g., '15min', '1h')
+        smooth_window: Rolling window size for smoothing (set 1 to disable)
         output_file: Output image path
     """
     print("\n" + "=" * 70)
@@ -642,6 +757,15 @@ def plot_fleet_comparison(charging_folder: str,
                                             time_start=ts_start,
                                             time_end=ts_end,
                                             freq=freq)
+
+    # Optional smoothing
+    if smooth_window and smooth_window > 1:
+        agg_original['total_demand_kwh'] = agg_original['total_demand_kwh'].rolling(
+            window=smooth_window, center=True, min_periods=1
+        ).mean()
+        agg_pv['total_demand_kwh'] = agg_pv['total_demand_kwh'].rolling(
+            window=smooth_window, center=True, min_periods=1
+        ).mean()
 
     # Calculate statistics
     print("\nCalculating fleet statistics...")
@@ -835,11 +959,18 @@ def process_fleet_and_plot(
     skip_existing: bool = True,
     time_start: Optional[str] = None,
     time_end: Optional[str] = None,
+    daily_profile_start: Optional[str] = None,
+    daily_profile_end: Optional[str] = None,
     single_date: Optional[str] = None,
     freq_range: str = '1h',
     freq_single: str = '15min',
+    freq_daily_profiles: str = '15min',
+    smooth_range: int = 1,
+    smooth_single: int = 1,
+    smooth_window: int = 3,
     output_plot: str = 'fleet_scenario_comparison.png',
-    output_daily_plot: str = 'fleet_daily_pattern.png'
+    output_daily_plot: str = 'fleet_daily_pattern.png',
+    output_daily_profiles: str = 'fleet_daily_profiles.png'
 ):
     """
     Complete pipeline: Process all vehicles and create fleet comparison plots
@@ -853,11 +984,18 @@ def process_fleet_and_plot(
         skip_existing: Skip processing if output file already exists (default True)
         time_start: Start date for range plot (e.g., '2023-01-01') or None
         time_end: End date for range plot (e.g., '2023-12-31') or None
+        daily_profile_start: Start date for daily profiles plot or None to skip
+        daily_profile_end: End date for daily profiles plot or None to skip
         single_date: Single date for daily pattern plot (e.g., '2023-01-15') or None
         freq_range: Time resolution for range plot aggregation (e.g., '15min', '1h')
         freq_single: Time resolution for single day plot aggregation (e.g., '1min', '15min')
+        freq_daily_profiles: Time resolution for daily profiles plot aggregation (e.g., '15min')
+        smooth_range: Rolling window size for smoothing range plot (set 1 to disable)
+        smooth_single: Rolling window size for smoothing single day plot (set 1 to disable)
+        smooth_window: Rolling window size for smoothing daily profiles (centered)
         output_plot: Output time-series plot filename
         output_daily_plot: Output daily pattern plot filename
+        output_daily_profiles: Output daily profiles plot filename
     """
     print("\n" + "=" * 70)
     print("EV FLEET PV ANALYSIS PIPELINE")
@@ -945,6 +1083,7 @@ def process_fleet_and_plot(
         time_start=time_start,
         time_end=time_end,
         freq=freq_range,
+        smooth_window=smooth_range,
         output_file=output_plot_path
     )
 
@@ -956,11 +1095,26 @@ def process_fleet_and_plot(
             pv_folder=str(output_dir),        # Load PV-integrated files from output folder
             single_date=single_date,
             freq=freq_single,
+            smooth_window=smooth_single,
             output_file=output_daily_plot_path
         )
     else:
         print("\n  Note: No single_date specified, skipping daily pattern plot")
         output_daily_plot_path = None
+
+    # Step 5: Create daily profiles plot across a date range
+    if daily_profile_start and daily_profile_end:
+        plot_range_daily_profiles(
+            charging_folder=charging_folder,
+            pv_folder=str(output_dir),
+            date_start=daily_profile_start,
+            date_end=daily_profile_end,
+            freq=freq_daily_profiles,
+            smooth_window=smooth_window,
+            output_file=output_daily_profiles
+        )
+    else:
+        print("\n  Note: No daily_profile_start/end specified, skipping daily profiles plot")
 
     print("\n" + "=" * 70)
     print("PIPELINE COMPLETE!")
@@ -972,6 +1126,8 @@ def process_fleet_and_plot(
     print(f"Time-series plot: {output_plot_path}")
     if output_daily_plot_path:
         print(f"Daily pattern plot: {output_daily_plot_path}")
+    if daily_profile_start and daily_profile_end:
+        print(f"Daily profiles plot: {output_daily_profiles}")
     print(f"All files saved in: {output_folder}")
     print("=" * 70)
 
@@ -994,12 +1150,21 @@ if __name__ == '__main__':
         'time_start': '2020-11-01',                     # Range plot start date (e.g., '2020-11-01')
         'time_end': '2020-11-07',                       # Range plot end date (e.g., '2020-11-07')
         'freq_range': '1min',                             # Range plot aggregation frequency: '15min', '30min', '1h'
+        'smooth_range': 5,                              # Rolling window for range plot smoothing (set 1 to disable)
         'output_plot': 'fleet_scenario_comparison.png',  # Output time-series plot filename
 
         # Single day plot settings
         'single_date': '2020-11-03',                    # Single day to visualize (e.g., '2020-11-03'), or None to skip
         'freq_single': '1min',                         # Single day plot aggregation frequency: '1min', '5min', '15min'
-        'output_daily_plot': 'fleet_daily_pattern.png'  # Output daily pattern plot filename
+        'smooth_single': 5,                             # Rolling window for single day plot smoothing (set 1 to disable)
+        'output_daily_plot': 'fleet_daily_pattern.png',  # Output daily pattern plot filename
+
+        # Daily profiles plot settings (range of days, overlaid curves)
+        'daily_profile_start': '2020-10-01',            # Start date for daily profiles plot, or None to skip
+        'daily_profile_end': '2020-12-31',              # End date for daily profiles plot
+        'freq_daily_profiles': '20min',                 # Aggregation frequency for daily profiles
+        'smooth_window': 5,                             # Rolling window size for smoothing (set 1 to disable)
+        'output_daily_profiles': 'fleet_daily_profiles.png'  # Output daily profiles plot filename
     }
 
     # Run complete pipeline
