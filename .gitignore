@@ -9,3 +9,5 @@ traj
 output
 CLAUDE.md
 .claude
+*.csv
+*.png

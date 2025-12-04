@@ -57,7 +57,7 @@ CONFIG = {
         'parallel': False,                  # 是否并行处理
         'n_jobs': 1,                        # 并行进程数
         'skip_files': ['0.csv', '1.csv', '2.csv', '3.csv', '4.csv'
-                       , '5.csv', '6.csv'],  # 跳过文件
+                       , '5.csv', '6.csv', '7.csv'],  # 跳过文件
     },
     'verbose': True,                        # 是否显示详细信息
 }
