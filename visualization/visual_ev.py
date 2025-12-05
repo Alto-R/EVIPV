@@ -244,7 +244,7 @@ def plot_annual_generation(annual_df, save_path=None):
     plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
     # 设置x轴范围（手动指定）
-    ax.set_xlim(pd.Timestamp('2018-12-01'), pd.Timestamp('2020-03-01'))
+    ax.set_xlim(pd.Timestamp('2019-12-01'), pd.Timestamp('2021-02-01'))
 
     # 设置y轴从0开始
     ax.set_ylim(bottom=0)
@@ -308,7 +308,7 @@ def plot_cumulative_generation(annual_df, save_path=None):
     plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
     # 设置x轴范围（手动指定）
-    ax.set_xlim(pd.Timestamp('2018-12-01'), pd.Timestamp('2020-03-01'))
+    ax.set_xlim(pd.Timestamp('2019-12-01'), pd.Timestamp('2021-02-01'))
 
     # 设置y轴从0开始
     ax.set_ylim(bottom=0)
@@ -335,9 +335,9 @@ def plot_cumulative_generation(annual_df, save_path=None):
 # ================== 主程序 ==================
 if __name__ == '__main__':
     # 配置参数
-    OUTPUT_DIR = '../output_bus'
-    TARGET_DATE = '2019-08-15'  # 可修改日期
-    MAX_FILES = 1000  # 限制处理的文件数量（设置为None则处理全部）
+    OUTPUT_DIR = '/data2/hcr/evipv/output_ev'
+    TARGET_DATE = '2020-08-15'  # 可修改日期
+    MAX_FILES = None  # 限制处理的文件数量（设置为None则处理全部）
 
     # 获取所有PV文件
     pv_files = get_all_pv_files(OUTPUT_DIR, max_files=MAX_FILES)
@@ -355,7 +355,7 @@ if __name__ == '__main__':
 
     # ========== 保存年度数据 ==========
     if annual_data is not None:
-        annual_csv_path = 'annual_statistics_bus.csv'
+        annual_csv_path = 'annual_statistics_ev.csv'
         annual_data.to_csv(annual_csv_path, index=False, encoding='utf-8')
         print(f"\n✅ 年度统计数据已保存至: {annual_csv_path}")
         print(f"   包含列: {', '.join(annual_data.columns.tolist())}")
@@ -366,7 +366,7 @@ if __name__ == '__main__':
     if daily_data is not None:
         try:
             plot_daily_generation(daily_data, TARGET_DATE,
-                                save_path=f'daily_pv_generation_{TARGET_DATE}_bus.png')
+                                save_path=f'daily_pv_generation_{TARGET_DATE}_ev.png')
         except Exception as e:
             print(f"绘制日发电图时出错: {e}")
     else:
@@ -376,7 +376,7 @@ if __name__ == '__main__':
     if annual_data is not None:
         try:
             plot_annual_generation(annual_data,
-                                 save_path='annual_pv_generation_bus.png')
+                                 save_path='annual_pv_generation_ev.png')
         except Exception as e:
             print(f"绘制年度发电图时出错: {e}")
     else:
@@ -386,7 +386,7 @@ if __name__ == '__main__':
     if annual_data is not None:
         try:
             plot_cumulative_generation(annual_data,
-                                     save_path='cumulative_pv_generation_bus.png')
+                                     save_path='cumulative_pv_generation_ev.png')
         except Exception as e:
             print(f"绘制累计发电图时出错: {e}")
     else:

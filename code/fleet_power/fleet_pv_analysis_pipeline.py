@@ -488,26 +488,48 @@ def plot_range_daily_profiles(
         return
 
     print("Creating daily profiles plot...")
-    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(20, 7))
 
-    def plot_panel(ax, daily_data, title):
-        for date_obj, agg in daily_data:
+    # Define red-to-blue gradient colors
+    color_palette = [
+        '#982B2D', '#C84747', '#DE6A69', '#EE9D9F', '#FCCDC9',
+        '#F1EEED', '#E2F4FE', '#BBE6FA', '#89CAEA', '#4596CD',
+        '#0B75B3', '#015696', '#012A61'
+    ]
+
+    # Generate color list based on number of days
+    n_days = len(daily_original)
+    if n_days <= len(color_palette):
+        colors = color_palette[:n_days]
+    else:
+        # Interpolate colors if more days than colors
+        import numpy as np
+        indices = np.linspace(0, len(color_palette) - 1, n_days)
+        colors = [color_palette[int(i)] for i in indices]
+
+    def plot_panel(ax, daily_data, title, colors):
+        for idx, (date_obj, agg) in enumerate(daily_data):
             label = date_obj.strftime('%m-%d')
-            ax.plot(agg['hour'], agg['total_demand_kwh'], linewidth=1.5, alpha=0.7, label=label)
+            ax.plot(agg['hour'], agg['total_demand_kwh'],
+                   linewidth=1.5, alpha=0.8, label=label, color=colors[idx])
         ax.set_title(title, fontsize=14, fontweight='bold')
         ax.set_xlabel('Time (h)', fontsize=12, fontweight='bold')
         ax.set_ylabel(f'Demand per {freq} (kWh)', fontsize=12, fontweight='bold')
         ax.grid(True, linestyle='--', alpha=0.3)
         ax.set_xlim(0, 24)
 
-    plot_panel(axes[0], daily_original, 'Original Demand')
-    plot_panel(axes[1], daily_pv, 'With PV (Net Grid)')
-    plot_panel(axes[2], daily_reduction, 'Net Reduction')
+    plot_panel(axes[0], daily_original, 'Original Demand', colors)
+    plot_panel(axes[1], daily_pv, 'With PV (Net Grid)', colors)
+    plot_panel(axes[2], daily_reduction, 'Net Reduction', colors)
 
+    # Apply tight_layout for subplots
+    plt.tight_layout()
+
+    # Add legend completely outside the figure area at the bottom
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='upper center', ncol=10, fontsize=8, frameon=False)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    fig.legend(handles, labels, loc='upper center', ncol=min(n_days, 15),
+              fontsize=9, frameon=True,
+              bbox_to_anchor=(0.5, -0.02), bbox_transform=fig.transFigure)
     print(f"Saving daily profiles plot to: {output_file}")
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     plt.show()
@@ -710,7 +732,8 @@ def plot_geo_reduction(
     slice_hours: int = 6,
     output_file: str = 'fleet_geo_reduction.png',
     min_reduction: float = 0.0,
-    bbox: Optional[Tuple[float, float, float, float]] = None
+    bbox: Optional[Tuple[float, float, float, float]] = None,
+    show_roads: bool = False
 ):
     """
     Static geographic visualization of demand reduction for a given day.
@@ -723,6 +746,7 @@ def plot_geo_reduction(
         output_file: Output image path.
         min_reduction: Clip reductions below this (e.g., 0 to ignore negative/zero).
         bbox: (lon_min, lon_max, lat_min, lat_max); default covers Shanghai.
+        show_roads: Overlay Natural Earth road network (may trigger download on first use).
     """
     print("\n" + "=" * 70)
     print("STEP: GEOGRAPHIC REDUCTION MAP")
@@ -776,11 +800,22 @@ def plot_geo_reduction(
     all_events = pd.concat(events, ignore_index=True)
 
     slice_labels = sorted(all_events['slice_label'].unique(), key=lambda s: int(s.split('-')[0]))
-    n_slices = min(4, len(slice_labels))  # 2x2 grid max
-    slice_labels = slice_labels[:n_slices]
-    rows, cols = 2, 2
+    n_slices = len(slice_labels)
 
-    vmax = all_events['reduction_kwh'].max()
+    # Dynamically determine grid layout based on number of slices
+    if n_slices <= 4:
+        rows, cols = 2, 2
+    elif n_slices <= 6:
+        rows, cols = 2, 3
+    elif n_slices <= 8:
+        rows, cols = 2, 4
+    elif n_slices <= 12:
+        rows, cols = 3, 4
+    else:
+        rows, cols = 4, 4  # Maximum 16 subplots
+
+    # Use 95th percentile as upper limit to avoid extreme values dominating the color scale
+    vmax = all_events['reduction_kwh'].quantile(0.95)
     if vmax <= 0:
         print("No positive reduction values; geo plot skipped.")
         return
@@ -799,6 +834,16 @@ def plot_geo_reduction(
     if bbox is None:
         bbox = (120.85, 122.10, 30.60, 31.80)
     lon_min, lon_max, lat_min, lat_max = bbox
+
+    roads_feature = None
+    if show_roads:
+        roads_feature = cfeature.NaturalEarthFeature(
+            'cultural',
+            'roads',
+            '10m',
+            edgecolor='gray',
+            facecolor='none'
+        )
 
     for idx, label in enumerate(slice_labels):
         r = idx // cols
@@ -824,6 +869,8 @@ def plot_geo_reduction(
         ax.coastlines(resolution='10m', alpha=0.3)
         ax.add_feature(cfeature.BORDERS.with_scale('10m'), linewidth=0.5, alpha=0.5)
         ax.add_feature(cfeature.LAND.with_scale('10m'), facecolor='#f2efe9', alpha=0.8)
+        if roads_feature is not None:
+            ax.add_feature(roads_feature, linewidth=0.5, alpha=0.4)
         ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=ccrs.PlateCarree())
 
     for j in range(n_slices, rows * cols):
@@ -831,10 +878,26 @@ def plot_geo_reduction(
         c = j % cols
         axes[r][c].axis('off')
 
+    # Add colorbar on the right side of all subplots
     if sc is not None:
-        fig.colorbar(sc, ax=axes.ravel().tolist(), label='Demand reduction (kWh)')
+        # Use tight_layout first to position subplots
+        plt.tight_layout(rect=[0, 0, 0.9, 1])
 
-    plt.tight_layout()
+        # Create colorbar with explicit positioning
+        cbar = fig.colorbar(
+            sc,
+            ax=axes.ravel().tolist(),
+            label='Demand reduction (kWh)',
+            location='right',
+            fraction=0.046,
+            pad=0.04,
+            shrink=0.8
+        )
+        cbar.ax.tick_params(labelsize=10)
+        cbar.set_label('Demand reduction (kWh)', fontsize=11, fontweight='bold')
+    else:
+        plt.tight_layout()
+
     print(f"Saving geographic reduction plot to: {output_file}")
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     plt.show()
@@ -913,7 +976,7 @@ def plot_fleet_comparison(charging_folder: str,
 
     # Plot
     print("Creating plot...")
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 12), height_ratios=[2, 1])
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(30, 12), height_ratios=[2, 1])
 
     # ========== Upper Plot: Scenario Comparison ==========
     # Plot Scenario A
@@ -1110,6 +1173,7 @@ def process_fleet_and_plot(
     geo_slice_hours: int = 6,
     geo_min_reduction: float = 0.0,
     geo_bbox: Optional[Tuple[float, float, float, float]] = None,
+    geo_show_roads: bool = False,
     output_plot: str = 'fleet_scenario_comparison.png',
     output_daily_plot: str = 'fleet_daily_pattern.png',
     output_daily_profiles: str = 'fleet_daily_profiles.png',
@@ -1140,6 +1204,7 @@ def process_fleet_and_plot(
         geo_slice_hours: Time slice size (hours) for geo plot subpanels
         geo_min_reduction: Clip reductions below this threshold for geo plot
         geo_bbox: (lon_min, lon_max, lat_min, lat_max); default covers Shanghai
+        geo_show_roads: Overlay Natural Earth road network in geographic plot (may trigger download on first use)
         output_plot: Output time-series plot filename
         output_daily_plot: Output daily pattern plot filename
         output_daily_profiles: Output daily profiles plot filename
@@ -1272,7 +1337,8 @@ def process_fleet_and_plot(
             slice_hours=geo_slice_hours,
             output_file=output_geo_plot,
             min_reduction=geo_min_reduction,
-            bbox=geo_bbox
+            bbox=geo_bbox,
+            show_roads=geo_show_roads
         )
     else:
         print("\n  Note: No geo_plot_date specified, skipping geographic reduction plot")
@@ -1310,9 +1376,9 @@ if __name__ == '__main__':
         'skip_existing': True,                          # Skip already processed vehicles (True/False)
 
         # Range plot (time-series) settings
-        'time_start': '2020-11-01',                     # Range plot start date (e.g., '2020-11-01')
-        'time_end': '2020-11-07',                       # Range plot end date (e.g., '2020-11-07')
-        'freq_range': '1min',                             # Range plot aggregation frequency: '15min', '30min', '1h'
+        'time_start': '2020-10-01',                     # Range plot start date (e.g., '2020-11-01')
+        'time_end': '2020-12-31',                       # Range plot end date (e.g., '2020-11-07')
+        'freq_range': '1h',                             # Range plot aggregation frequency: '15min', '30min', '1h'
         'smooth_range': 5,                              # Rolling window for range plot smoothing (set 1 to disable)
         'output_plot': 'fleet_scenario_comparison.png',  # Output time-series plot filename
 
@@ -1330,8 +1396,8 @@ if __name__ == '__main__':
         'output_daily_profiles': 'fleet_daily_profiles.png',  # Output daily profiles plot filename
 
         # Geographic reduction plot
-        'geo_plot_date': '2020-11-03',                  # Date to visualize geographically (or None to skip)
-        'geo_slice_hours': 6,                           # Hours per subplot slice (e.g., 6 -> 4 subplots)
+        'geo_plot_date': '2020-11-01',                  # Date to visualize geographically (or None to skip)
+        'geo_slice_hours': 3,                           # Hours per subplot slice (e.g., 6 -> 4 subplots)
         'geo_min_reduction': 0.0,                       # Clip reductions below this for plotting
         'geo_bbox': (120.85, 122.10, 30.60, 31.80),     # Bounding box (lon_min, lon_max, lat_min, lat_max)
         'output_geo_plot': 'fleet_geo_reduction.png'    # Output geographic plot filename
